@@ -1,0 +1,303 @@
+package server
+
+import (
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"davd/internal/auth"
+	"davd/internal/config"
+	"davd/internal/store"
+
+	"go.yaml.in/yaml/v3"
+)
+
+type client struct {
+	t    *testing.T
+	srv  *httptest.Server
+	user string
+}
+
+func newTestServer(t *testing.T) (*client, *client) {
+	t.Helper()
+	dir := t.TempDir()
+	hash, err := auth.Hash("pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Users: map[string]config.User{
+		"alice": {Password: hash, Email: "alice@example.com", Name: "Alice"},
+		"bob":   {Password: hash},
+	}}
+	b, _ := yaml.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := config.NewStore(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := httptest.NewServer(New(cs, store.New(dir, UIDOf), log))
+	t.Cleanup(srv.Close)
+	return &client{t, srv, "alice"}, &client{t, srv, "bob"}
+}
+
+func (c *client) do(method, path, body string, hdr ...string) (*http.Response, string) {
+	c.t.Helper()
+	req, _ := http.NewRequest(method, c.srv.URL+path, strings.NewReader(body))
+	if c.user != "" {
+		req.SetBasicAuth(c.user, "pw")
+	}
+	for i := 0; i+1 < len(hdr); i += 2 {
+		req.Header.Set(hdr[i], hdr[i+1])
+	}
+	cl := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := cl.Do(req)
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp, string(b)
+}
+
+func (c *client) expect(method, path, body string, status int, hdr ...string) (*http.Response, string) {
+	c.t.Helper()
+	resp, out := c.do(method, path, body, hdr...)
+	if resp.StatusCode != status {
+		c.t.Fatalf("%s %s: status %d, want %d\n%s", method, path, resp.StatusCode, status, out)
+	}
+	return resp, out
+}
+
+func contains(t *testing.T, s string, subs ...string) {
+	t.Helper()
+	for _, sub := range subs {
+		if !strings.Contains(s, sub) {
+			t.Errorf("missing %q in:\n%s", sub, s)
+		}
+	}
+}
+
+func notContains(t *testing.T, s string, subs ...string) {
+	t.Helper()
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			t.Errorf("unexpected %q in:\n%s", sub, s)
+		}
+	}
+}
+
+const propfindPrincipal = `<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>`
+
+func TestDiscovery(t *testing.T) {
+	alice, _ := newTestServer(t)
+	resp, _ := alice.expect("GET", "/.well-known/caldav", "", http.StatusMovedPermanently)
+	if resp.Header.Get("Location") != "/dav/" {
+		t.Fatal(resp.Header.Get("Location"))
+	}
+	anon := &client{t, alice.srv, ""}
+	anon.expect("PROPFIND", "/dav/", propfindPrincipal, http.StatusUnauthorized)
+	resp, _ = anon.expect("OPTIONS", "/dav/", "", http.StatusOK)
+	contains(t, resp.Header.Get("DAV"), "calendar-access")
+
+	_, out := alice.expect("PROPFIND", "/dav/", propfindPrincipal, http.StatusMultiStatus, "Depth", "0")
+	contains(t, out, "<d:current-user-principal><d:href>/dav/principals/alice/</d:href>")
+
+	_, out = alice.expect("PROPFIND", "/dav/principals/alice/", `<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop>
+		<c:calendar-home-set/><c:calendar-user-address-set/><d:displayname/><d:resourcetype/></d:prop></d:propfind>`, http.StatusMultiStatus, "Depth", "0")
+	contains(t, out, "<cal:calendar-home-set><d:href>/dav/calendars/alice/</d:href>",
+		"mailto:alice@example.com", "<d:displayname>Alice</d:displayname>", "<d:principal/>")
+
+	_, out = alice.expect("PROPFIND", "/dav/calendars/alice/", `<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/"><d:prop>
+		<d:resourcetype/><d:displayname/><c:supported-calendar-component-set/><cs:getctag/><x:unknown xmlns:x="urn:x"/></d:prop></d:propfind>`,
+		http.StatusMultiStatus, "Depth", "1")
+	contains(t, out, "/dav/calendars/alice/default/", "/dav/calendars/alice/tasks/", "/dav/calendars/alice/journal/",
+		`<cal:comp name="VTODO"/>`, "<cal:calendar/>", "<cs:getctag>0</cs:getctag>", "404 Not Found")
+
+	// allprop
+	_, out = alice.expect("PROPFIND", "/dav/calendars/alice/default/", "", http.StatusMultiStatus, "Depth", "0")
+	contains(t, out, "<d:displayname>Calendar</d:displayname>", "calendar-multiget")
+}
+
+func TestAccessControl(t *testing.T) {
+	alice, bob := newTestServer(t)
+	bob.expect("PROPFIND", "/dav/calendars/alice/", "", http.StatusForbidden, "Depth", "0")
+	bob.expect("PUT", "/dav/calendars/alice/default/x.ics", event("x", "20260101T100000Z", ""), http.StatusForbidden)
+	bob.expect("PROPFIND", "/dav/principals/alice/", "", http.StatusMultiStatus, "Depth", "0")
+	alice.expect("PROPFIND", "/dav/calendars/nobody/", "", http.StatusNotFound, "Depth", "0")
+	alice.expect("PROPFIND", "/dav/calendars/alice/../bob/", "", http.StatusNotFound, "Depth", "0")
+}
+
+func event(uid, start, extra string) string {
+	return "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\nUID:" + uid +
+		"\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:" + start + "\r\nDURATION:PT1H\r\nSUMMARY:ev " + uid + "\r\n" + extra +
+		"END:VEVENT\r\nEND:VCALENDAR\r\n"
+}
+
+func TestPutGetDelete(t *testing.T) {
+	alice, _ := newTestServer(t)
+	path := "/dav/calendars/alice/default/one.ics"
+	body := event("one", "20260105T090000Z", "")
+	resp, _ := alice.expect("PUT", path, body, http.StatusCreated, "Content-Type", "text/calendar", "If-None-Match", "*")
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("no etag")
+	}
+	alice.expect("PUT", path, body, http.StatusPreconditionFailed, "If-None-Match", "*")
+	alice.expect("PUT", path, body, http.StatusPreconditionFailed, "If-Match", `"nope"`)
+	resp, got := alice.expect("GET", path, "", http.StatusOK)
+	if got != body || resp.Header.Get("ETag") != etag {
+		t.Fatalf("GET mismatch: %q", got)
+	}
+	alice.expect("GET", path, "", http.StatusNotModified, "If-None-Match", etag)
+
+	// UID conflict in another resource of the same calendar.
+	_, out := alice.expect("PUT", "/dav/calendars/alice/default/dup.ics", body, http.StatusConflict)
+	contains(t, out, "no-uid-conflict", "one.ics")
+
+	// Wrong component for the collection.
+	todo := strings.ReplaceAll(body, "VEVENT", "VTODO")
+	_, out = alice.expect("PUT", "/dav/calendars/alice/default/todo.ics", strings.ReplaceAll(todo, "UID:one", "UID:t1"), http.StatusForbidden)
+	contains(t, out, "supported-calendar-component")
+	alice.expect("PUT", "/dav/calendars/alice/tasks/todo.ics", strings.ReplaceAll(todo, "UID:one", "UID:t1"), http.StatusCreated)
+
+	// Garbage.
+	_, out = alice.expect("PUT", "/dav/calendars/alice/default/bad.ics", "hello", http.StatusForbidden)
+	contains(t, out, "valid-calendar-data")
+	alice.expect("PUT", "/dav/calendars/alice/nocal/x.ics", body, http.StatusConflict)
+
+	// ctag moved.
+	_, out = alice.expect("PROPFIND", "/dav/calendars/alice/default/", `<d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/"><d:prop><cs:getctag/></d:prop></d:propfind>`, http.StatusMultiStatus, "Depth", "0")
+	contains(t, out, "<cs:getctag>1</cs:getctag>")
+
+	alice.expect("DELETE", path, "", http.StatusPreconditionFailed, "If-Match", `"nope"`)
+	alice.expect("DELETE", path, "", http.StatusNoContent, "If-Match", etag)
+	alice.expect("GET", path, "", http.StatusNotFound)
+}
+
+func TestMkcalendarProppatch(t *testing.T) {
+	alice, _ := newTestServer(t)
+	alice.expect("MKCALENDAR", "/dav/calendars/alice/work/", `<?xml version="1.0"?>
+<c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:a="http://apple.com/ns/ical/">
+ <d:set><d:prop><d:displayname>Work</d:displayname><a:calendar-color>#FF0000FF</a:calendar-color>
+ <c:supported-calendar-component-set><c:comp name="VEVENT"/><c:comp name="VTODO"/></c:supported-calendar-component-set></d:prop></d:set>
+</c:mkcalendar>`, http.StatusCreated)
+	alice.expect("MKCALENDAR", "/dav/calendars/alice/work/", "", http.StatusMethodNotAllowed)
+	alice.expect("MKCOL", "/dav/calendars/alice/ext/", `<d:mkcol xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:set><d:prop>
+		<d:resourcetype><d:collection/><c:calendar/></d:resourcetype><d:displayname>Ext</d:displayname></d:prop></d:set></d:mkcol>`, http.StatusCreated)
+	alice.expect("MKCOL", "/dav/calendars/alice/plain/", "", http.StatusForbidden)
+
+	_, out := alice.expect("PROPPATCH", "/dav/calendars/alice/work/", `<d:propertyupdate xmlns:d="DAV:" xmlns:a="http://apple.com/ns/ical/" xmlns:x="urn:x">
+		<d:set><d:prop><a:calendar-order>3</a:calendar-order><x:foo>bar</x:foo></d:prop></d:set></d:propertyupdate>`, http.StatusMultiStatus)
+	contains(t, out, "200 OK")
+	_, out = alice.expect("PROPPATCH", "/dav/calendars/alice/work/", `<d:propertyupdate xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">
+		<d:set><d:prop><d:displayname>New</d:displayname><cs:getctag>9</cs:getctag></d:prop></d:set></d:propertyupdate>`, http.StatusMultiStatus)
+	contains(t, out, "403 Forbidden", "424 Failed Dependency")
+
+	_, out = alice.expect("PROPFIND", "/dav/calendars/alice/work/", "", http.StatusMultiStatus, "Depth", "0")
+	contains(t, out, "<d:displayname>Work</d:displayname>", "<ical:calendar-color>#FF0000FF</ical:calendar-color>",
+		"<ical:calendar-order>3</ical:calendar-order>", `<x:foo xmlns:x="urn:x">bar</x:foo>`)
+	notContains(t, out, `name="VJOURNAL"`)
+
+	alice.expect("DELETE", "/dav/calendars/alice/work/", "", http.StatusNoContent)
+	alice.expect("PROPFIND", "/dav/calendars/alice/work/", "", http.StatusNotFound, "Depth", "0")
+}
+
+const berlinTZ = "BEGIN:VTIMEZONE\r\nTZID:Europe/Berlin\r\nBEGIN:STANDARD\r\nDTSTART:19701025T030000\r\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\r\nTZOFFSETFROM:+0200\r\nTZOFFSETTO:+0100\r\nEND:STANDARD\r\nBEGIN:DAYLIGHT\r\nDTSTART:19700329T020000\r\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0200\r\nEND:DAYLIGHT\r\nEND:VTIMEZONE\r\n"
+
+// A weekly series in Berlin with one moved and one cancelled instance.
+const weekly = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n" + berlinTZ +
+	"BEGIN:VEVENT\r\nUID:weekly\r\nDTSTAMP:20260101T000000Z\r\nDTSTART;TZID=Europe/Berlin:20260105T090000\r\nDTEND;TZID=Europe/Berlin:20260105T100000\r\n" +
+	"RRULE:FREQ=WEEKLY;COUNT=13\r\nEXDATE;TZID=Europe/Berlin:20260119T090000\r\nSUMMARY:Standup\r\nEND:VEVENT\r\n" +
+	"BEGIN:VEVENT\r\nUID:weekly\r\nDTSTAMP:20260101T000000Z\r\nRECURRENCE-ID;TZID=Europe/Berlin:20260126T090000\r\n" +
+	"DTSTART;TZID=Europe/Berlin:20260127T140000\r\nDTEND;TZID=Europe/Berlin:20260127T150000\r\nSUMMARY:Standup moved\r\nEND:VEVENT\r\n" +
+	"END:VCALENDAR\r\n"
+
+func query(start, end string) string {
+	return `<?xml version="1.0"?><c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+<d:prop><d:getetag/></d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">
+<c:time-range start="` + start + `" end="` + end + `"/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>`
+}
+
+func TestCalendarQueryRecurring(t *testing.T) {
+	alice, _ := newTestServer(t)
+	alice.expect("PUT", "/dav/calendars/alice/default/weekly.ics", weekly, http.StatusCreated)
+	alice.expect("PUT", "/dav/calendars/alice/default/single.ics", event("single", "20260301T120000Z", ""), http.StatusCreated)
+
+	cases := []struct {
+		start, end string
+		weekly     bool
+		single     bool
+	}{
+		{"20260112T000000Z", "20260113T000000Z", true, false},  // 2nd instance
+		{"20260119T000000Z", "20260120T000000Z", false, false}, // EXDATE
+		{"20260126T000000Z", "20260127T000000Z", false, false}, // moved away from here
+		{"20260127T120000Z", "20260127T140000Z", true, false},  // moved to 14:00 CET = 13:00Z
+		{"20260309T075900Z", "20260309T080001Z", true, false},  // 09:00 CET = 08:00Z
+		{"20260330T065900Z", "20260330T070001Z", true, false},  // after DST: 09:00 CEST = 07:00Z
+		{"20260406T000000Z", "20260501T000000Z", false, false}, // after COUNT=13 (last is 2026-03-30)
+		{"20260301T000000Z", "20260302T000000Z", false, true},
+		{"20250101T000000Z", "20270101T000000Z", true, true},
+	}
+	for _, c := range cases {
+		_, out := alice.expect("REPORT", "/dav/calendars/alice/default/", query(c.start, c.end), http.StatusMultiStatus, "Depth", "1")
+		if strings.Contains(out, "weekly.ics") != c.weekly || strings.Contains(out, "single.ics") != c.single {
+			t.Errorf("range %s-%s: weekly=%v single=%v, want %v %v\n%s", c.start, c.end,
+				strings.Contains(out, "weekly.ics"), strings.Contains(out, "single.ics"), c.weekly, c.single, out)
+		}
+	}
+}
+
+func TestMultigetAndExpand(t *testing.T) {
+	alice, _ := newTestServer(t)
+	alice.expect("PUT", "/dav/calendars/alice/default/weekly.ics", weekly, http.StatusCreated)
+	_, out := alice.expect("REPORT", "/dav/calendars/alice/default/", `<c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+<d:prop><d:getetag/><c:calendar-data/></d:prop>
+<d:href>/dav/calendars/alice/default/weekly.ics</d:href><d:href>/dav/calendars/alice/default/missing.ics</d:href>
+</c:calendar-multiget>`, http.StatusMultiStatus)
+	contains(t, out, "RRULE:FREQ=WEEKLY;COUNT=13", "missing.ics</d:href><d:status>HTTP/1.1 404 Not Found")
+
+	_, out = alice.expect("REPORT", "/dav/calendars/alice/default/", `<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+<d:prop><c:calendar-data><c:expand start="20260112T000000Z" end="20260202T000000Z"/></c:calendar-data></d:prop>
+<c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"><c:time-range start="20260112T000000Z" end="20260202T000000Z"/></c:comp-filter></c:comp-filter></c:filter>
+</c:calendar-query>`, http.StatusMultiStatus, "Depth", "1")
+	contains(t, out,
+		"RECURRENCE-ID:20260112T080000Z", "DTSTART:20260112T080000Z",
+		"RECURRENCE-ID:20260126T080000Z", "DTSTART:20260127T130000Z", "Standup moved")
+	// 01-19 is excluded; 02-02 08:00Z starts after the (exclusive) range end.
+	notContains(t, out, "RRULE", "VTIMEZONE", "20260119T080000Z", "20260202T080000Z", "TZID")
+}
+
+func TestQueryTextMatchAndTodo(t *testing.T) {
+	alice, _ := newTestServer(t)
+	todo := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260101T000000Z\r\nDUE:20260210T120000Z\r\nSUMMARY:Buy Milk\r\nSTATUS:NEEDS-ACTION\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
+	alice.expect("PUT", "/dav/calendars/alice/tasks/t1.ics", todo, http.StatusCreated)
+	q := func(inner string) string {
+		return `<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/></d:prop>
+<c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VTODO">` + inner + `</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>`
+	}
+	for _, c := range []struct {
+		filter string
+		match  bool
+	}{
+		{``, true},
+		{`<c:prop-filter name="SUMMARY"><c:text-match>milk</c:text-match></c:prop-filter>`, true},
+		{`<c:prop-filter name="SUMMARY"><c:text-match collation="i;octet">milk</c:text-match></c:prop-filter>`, false},
+		{`<c:prop-filter name="STATUS"><c:text-match negate-condition="yes">COMPLETED</c:text-match></c:prop-filter>`, true},
+		{`<c:prop-filter name="COMPLETED"><c:is-not-defined/></c:prop-filter>`, true},
+		{`<c:time-range start="20260201T000000Z" end="20260301T000000Z"/>`, true},
+		{`<c:time-range start="20260301T000000Z" end="20260401T000000Z"/>`, false},
+	} {
+		_, out := alice.expect("REPORT", "/dav/calendars/alice/tasks/", q(c.filter), http.StatusMultiStatus, "Depth", "1")
+		if strings.Contains(out, "t1.ics") != c.match {
+			t.Errorf("filter %s: match=%v, want %v", c.filter, !c.match, c.match)
+		}
+	}
+}

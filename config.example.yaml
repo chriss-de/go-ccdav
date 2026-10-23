@@ -1,0 +1,24 @@
+# davd configuration. Lives in the data directory as config.yaml.
+# Reload without restart: kill -HUP <pid>  (or podman kill -s HUP <container>)
+
+# Public URL behind the reverse proxy; used for links in emails (RSVP).
+base_url: https://dav.example.com
+
+users:
+  alice:
+    # davd hash-password  (or: make hash-password). This one is "alice".
+    password: pbkdf2-sha256$600000$J5xw4iIT4MtKT67ZYgI0GQ$4ujnnC7z3r6KDutVDohybYCARLOkkWaEU+Ymq+9hJ3U
+    email: alice@example.com
+    name: Alice
+
+groups:
+  family: [alice]
+
+# Used once invitations are implemented (milestone 7).
+# smtp:
+#   host: smtp.example.com
+#   port: 587
+#   username: davd@example.com
+#   password: secret
+#   from: "Calendar <davd@example.com>"
+# rsvp_secret: change-me-to-a-long-random-string

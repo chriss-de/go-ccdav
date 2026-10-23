@@ -1,12 +1,14 @@
 package server
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -300,4 +302,88 @@ func TestQueryTextMatchAndTodo(t *testing.T) {
 			t.Errorf("filter %s: match=%v, want %v", c.filter, !c.match, c.match)
 		}
 	}
+}
+
+func syncReport(token string, limit int) string {
+	l := ""
+	if limit > 0 {
+		l = fmt.Sprintf("<d:limit><d:nresults>%d</d:nresults></d:limit>", limit)
+	}
+	return `<d:sync-collection xmlns:d="DAV:"><d:sync-token>` + token + `</d:sync-token><d:sync-level>1</d:sync-level>` + l +
+		`<d:prop><d:getetag/></d:prop></d:sync-collection>`
+}
+
+var syncTokenRe = regexp.MustCompile(`<d:sync-token>([^<]*)</d:sync-token>`)
+
+func tokenOf(t *testing.T, out string) string {
+	t.Helper()
+	m := syncTokenRe.FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("no sync-token in\n%s", out)
+	}
+	return m[1]
+}
+
+func TestSyncCollection(t *testing.T) {
+	alice, _ := newTestServer(t)
+	cal := "/dav/calendars/alice/default/"
+	_, out := alice.expect("PROPFIND", cal, `<d:propfind xmlns:d="DAV:"><d:prop><d:sync-token/><d:supported-report-set/></d:prop></d:propfind>`, http.StatusMultiStatus, "Depth", "0")
+	contains(t, out, "<d:sync-collection/>", "<d:sync-token>http://davd/ns/sync/")
+	_, out = alice.expect("PROPFIND", cal, "", http.StatusMultiStatus, "Depth", "0")
+	notContains(t, out, "<d:sync-token>") // not in allprop
+
+	for _, n := range []string{"a", "b", "c"} {
+		alice.expect("PUT", cal+n+".ics", event(n, "20260105T090000Z", ""), http.StatusCreated)
+	}
+	_, out = alice.expect("REPORT", cal, syncReport("", 0), http.StatusMultiStatus, "Depth", "0")
+	contains(t, out, "a.ics", "b.ics", "c.ics", "<d:getetag>")
+	tok1 := tokenOf(t, out)
+
+	// No changes.
+	_, out = alice.expect("REPORT", cal, syncReport(tok1, 0), http.StatusMultiStatus)
+	notContains(t, out, ".ics")
+	if tokenOf(t, out) != tok1 {
+		t.Fatal("token moved without changes")
+	}
+
+	alice.expect("PUT", cal+"a.ics", event("a", "20260106T090000Z", ""), http.StatusNoContent)
+	alice.expect("DELETE", cal+"b.ics", "", http.StatusNoContent)
+	alice.expect("PUT", cal+"d.ics", event("d", "20260105T090000Z", ""), http.StatusCreated)
+	_, out = alice.expect("REPORT", cal, syncReport(tok1, 0), http.StatusMultiStatus)
+	contains(t, out, "a.ics</d:href><d:propstat>", "b.ics</d:href><d:status>HTTP/1.1 404 Not Found", "d.ics</d:href><d:propstat>")
+	notContains(t, out, "c.ics")
+	tok2 := tokenOf(t, out)
+
+	// Property change: new token, no object changes.
+	alice.expect("PROPPATCH", cal, `<d:propertyupdate xmlns:d="DAV:" xmlns:a="http://apple.com/ns/ical/"><d:set><d:prop><a:calendar-color>#123456</a:calendar-color></d:prop></d:set></d:propertyupdate>`, http.StatusMultiStatus)
+	_, out = alice.expect("REPORT", cal, syncReport(tok2, 0), http.StatusMultiStatus)
+	notContains(t, out, ".ics")
+	tok3 := tokenOf(t, out)
+	if tok3 == tok2 {
+		t.Fatal("PROPPATCH did not bump the token")
+	}
+
+	// limit: truncated with 507 and a resumable token.
+	for _, n := range []string{"e", "f", "g"} {
+		alice.expect("PUT", cal+n+".ics", event(n, "20260105T090000Z", ""), http.StatusCreated)
+	}
+	_, out = alice.expect("REPORT", cal, syncReport(tok3, 2), http.StatusMultiStatus)
+	contains(t, out, "e.ics", "f.ics", "507 Insufficient Storage", "number-of-matches-within-limits")
+	notContains(t, out, "g.ics")
+	_, out = alice.expect("REPORT", cal, syncReport(tokenOf(t, out), 2), http.StatusMultiStatus)
+	contains(t, out, "g.ics")
+	notContains(t, out, "e.ics", "507")
+
+	// Invalid tokens.
+	for _, bad := range []string{"garbage", "http://davd/ns/sync/otherid-1", tok3 + "999" /* future counter */} {
+		_, out = alice.expect("REPORT", cal, syncReport(bad, 0), http.StatusForbidden)
+		contains(t, out, "valid-sync-token")
+	}
+	// Token of a deleted and recreated calendar.
+	alice.expect("DELETE", cal, "", http.StatusNoContent)
+	alice.expect("MKCALENDAR", cal, "", http.StatusCreated)
+	alice.expect("REPORT", cal, syncReport(tok3, 0), http.StatusForbidden)
+
+	// Not on the home.
+	alice.expect("REPORT", "/dav/calendars/alice/", syncReport("", 0), http.StatusForbidden)
 }

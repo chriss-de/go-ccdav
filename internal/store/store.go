@@ -10,7 +10,7 @@
 package store
 
 import (
-	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -55,6 +54,7 @@ type Meta struct {
 	Order       string   `json:"order,omitempty"`
 	Timezone    string   `json:"timezone,omitempty"`   // VCALENDAR text with one VTIMEZONE
 	Components  []string `json:"components,omitempty"` // VEVENT, VTODO, VJOURNAL
+	SyncID      string   `json:"sync_id,omitempty"`    // see Collection.SyncID
 	// DeadProps stores unknown PROPPATCHed properties: "{ns}local" -> inner XML.
 	DeadProps map[string]string `json:"dead_props,omitempty"`
 }
@@ -179,6 +179,7 @@ func (s *Store) CreateCollection(owner string, kind Kind, name string, m Meta) (
 		}
 		return nil, err
 	}
+	m.SyncID = newSyncID()
 	b, _ := json.MarshalIndent(m, "", "  ")
 	if err := writeFileAtomic(filepath.Join(dir, ".meta.json"), b); err != nil {
 		os.RemoveAll(dir)
@@ -208,12 +209,14 @@ type Collection struct {
 	dir   string
 	uidOf UIDFunc
 
-	mu      sync.RWMutex
-	meta    Meta
-	objs    map[string]ObjectInfo
-	uids    map[string]string // UID -> object name
-	token   uint64
-	deleted bool
+	mu       sync.RWMutex
+	meta     Meta
+	objs     map[string]ObjectInfo
+	uids     map[string]string // UID -> object name
+	token    uint64
+	floor    uint64 // sync tokens below this were compacted away
+	logLines int
+	deleted  bool
 }
 
 func (c *Collection) load() error {
@@ -251,8 +254,20 @@ func (c *Collection) load() error {
 			c.uids[info.UID] = info.Name
 		}
 	}
-	c.token, err = lastToken(filepath.Join(c.dir, ".changes.log"))
-	return err
+	l, err := readLog(filepath.Join(c.dir, logName))
+	if err != nil {
+		return err
+	}
+	c.token, c.floor, c.logLines = l.last(), l.floor, len(l.entries)
+	if c.meta.SyncID == "" {
+		// Collections from before sync support get an ID once.
+		c.meta.SyncID = newSyncID()
+		b, _ := json.MarshalIndent(c.meta, "", "  ")
+		if err := writeFileAtomic(filepath.Join(c.dir, ".meta.json"), b); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Collection) info(name string, data []byte, mod time.Time) ObjectInfo {
@@ -266,26 +281,6 @@ func (c *Collection) info(name string, data []byte, mod time.Time) ObjectInfo {
 	}
 }
 
-func lastToken(path string) (uint64, error) {
-	f, err := os.Open(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	defer f.Close()
-	var tok uint64
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		field, _, _ := strings.Cut(sc.Text(), " ")
-		if n, err := strconv.ParseUint(field, 10, 64); err == nil && n > tok {
-			tok = n
-		}
-	}
-	return tok, sc.Err()
-}
-
 // Meta returns a copy of the collection properties.
 func (c *Collection) Meta() Meta {
 	c.mu.RLock()
@@ -293,7 +288,8 @@ func (c *Collection) Meta() Meta {
 	return c.metaCopy()
 }
 
-// UpdateMeta applies fn to the properties and persists them.
+// UpdateMeta applies fn to the properties and persists them. A real
+// change bumps the sync token / CTag.
 func (c *Collection) UpdateMeta(fn func(*Meta)) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -302,12 +298,17 @@ func (c *Collection) UpdateMeta(fn func(*Meta)) error {
 	}
 	m := c.metaCopy()
 	fn(&m)
+	m.SyncID = c.meta.SyncID
 	b, _ := json.MarshalIndent(m, "", "  ")
+	if old, _ := json.MarshalIndent(c.meta, "", "  "); bytes.Equal(old, b) {
+		return nil
+	}
 	if err := writeFileAtomic(filepath.Join(c.dir, ".meta.json"), b); err != nil {
 		return err
 	}
 	c.meta = m
-	return nil
+	// Bump the token so clients notice property changes (color, name).
+	return c.logChange("META", "-")
 }
 
 // metaCopy deep-copies meta; the caller holds the lock.
@@ -455,22 +456,6 @@ func (c *Collection) ByUID(uid string) (string, bool) {
 	defer c.mu.RUnlock()
 	n, ok := c.uids[uid]
 	return n, ok
-}
-
-func (c *Collection) logChange(op, name string) error {
-	c.token++
-	f, err := os.OpenFile(filepath.Join(c.dir, ".changes.log"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o640)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(f, "%d %s %s\n", c.token, op, name)
-	if err == nil {
-		err = f.Sync()
-	}
-	if cerr := f.Close(); err == nil {
-		err = cerr
-	}
-	return err
 }
 
 func writeFileAtomic(path string, data []byte) error {

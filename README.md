@@ -4,7 +4,7 @@ A small self-hosted CalDAV server written in Go. It stores everything as plain f
 
 ## Status
 
-Milestones 1–3 are implemented:
+Milestones 1–4 are implemented:
 
 - **Discovery:** `/.well-known/caldav`, principals, calendar homes and PROPFIND.
 - **Writes:**
@@ -15,8 +15,9 @@ Milestones 1–3 are implemented:
 - **iCalendar parsing, an RRULE expander and timezone resolution** (IANA, Windows zone names, embedded VTIMEZONE).
 - **`calendar-query`:** comp, prop and param filters, `text-match`, and `time-range` on VEVENT, VTODO, VJOURNAL and VALARM, with recurrences expanded.
 - **`calendar-data`:** partial retrieval and `expand`.
+- **Sync (RFC 6578):** the `sync-collection` report with `limit`, plus `DAV:sync-token` and `getctag`. Changes to calendar properties also move the token, so clients pick up renames and colour changes quickly.
 
-The following are not implemented yet: sync-collection (milestone 4), CardDAV (5), sharing (6), scheduling and iMIP (7), and RSVP (8).
+The following are not implemented yet: CardDAV (milestone 5), sharing (6), scheduling and iMIP (7), and RSVP (8).
 
 ## Run
 

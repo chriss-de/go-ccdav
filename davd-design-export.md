@@ -22,7 +22,7 @@ Hand this file to a new session: "Read davd-design-export.md and continue from t
   - The server sends invitations itself and advertises `calendar-auto-schedule`.
   - RSVP uses the server's own HMAC-signed links (GET shows a confirmation page, POST records the answer), plus implicit scheduling for internal attendees. Receiving reply emails (IMAP, SMTP receiver, inbound webhook) is deferred.
   - Write our own RRULE expander with no dependencies, tested against ported test vectors. `teambition/rrule-go` is the fallback if this gets out of hand.
-- **Status (2026-10-23):** milestones 1–3 implemented (see README.md). Build via Makefile, deploy as a container behind a TLS-terminating reverse proxy. Next: milestone 4 (sync-collection).
+- **Status (2026-10-23):** milestones 1–4 implemented (see README.md). Build via Makefile, deploy as a container behind a TLS-terminating reverse proxy. Tested with DAVx⁵. Next: milestone 5 (CardDAV).
 
 ---
 
@@ -77,7 +77,8 @@ data/
 
 - **Atomic writes:** temp file, `fsync`, then `os.Rename`.
 - **ETag:** SHA-256 of the content, cached in memory.
-- **Sync token / CTag:** a monotonic counter, the last line of `.changes.log`. Compact the log occasionally.
+- **Sync token / CTag:** a monotonic counter, the last line of `.changes.log`. Property changes (PROPPATCH) log a `META` line and bump it too. The token URI is `http://davd/ns/sync/<sync_id>-<n>`; `sync_id` is random per collection, so tokens of a recreated collection are rejected.
+- **Compaction:** when the log exceeds 2× objects + 1000 lines, keep the newest line per name and at most 1000 tombstones; a `FLOOR n` line marks the oldest answerable token (older → 403 `valid-sync-token`, client resyncs).
 - **Locking:** one `sync.RWMutex` per collection. Load indexes into memory at startup; at 100 users that's fine.
 - **Search:** none. Queries scan the collection.
 

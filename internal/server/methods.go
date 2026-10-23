@@ -384,6 +384,8 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, res *resource) {
 		s.multiget(w, user, res, body)
 	case dav.N(dav.NSCalDAV, "calendar-query"):
 		s.calendarQuery(w, r, user, res, body)
+	case dav.N(dav.NSDAV, "sync-collection"):
+		s.syncCollection(w, user, res, body)
 	case dav.N(dav.NSDAV, "principal-search-property-set"):
 		w.Header().Set("Content-Type", `application/xml; charset="utf-8"`)
 		io.WriteString(w, `<?xml version="1.0" encoding="utf-8"?>`+"\n"+`<d:principal-search-property-set xmlns:d="DAV:"/>`+"\n")

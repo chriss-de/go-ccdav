@@ -22,6 +22,7 @@ var (
 	pCurrentUserPrivSet    = dav.N(dav.NSDAV, "current-user-privilege-set")
 	pSupportedReportSet    = dav.N(dav.NSDAV, "supported-report-set")
 	pGetETag               = dav.N(dav.NSDAV, "getetag")
+	pSyncToken             = dav.N(dav.NSDAV, "sync-token")
 	pGetContentType        = dav.N(dav.NSDAV, "getcontenttype")
 	pGetContentLength      = dav.N(dav.NSDAV, "getcontentlength")
 	pGetLastModified       = dav.N(dav.NSDAV, "getlastmodified")
@@ -118,7 +119,8 @@ func (s *Server) propValue(user string, res *resource, name xml.Name, req *dav.E
 			"read-current-user-privilege-set", "bind", "unbind"), http.StatusOK
 	case pSupportedReportSet:
 		if res.kind == kCalendar || res.kind == kCalObject {
-			return reports(dav.N(dav.NSCalDAV, "calendar-multiget"), dav.N(dav.NSCalDAV, "calendar-query")), http.StatusOK
+			return reports(dav.N(dav.NSCalDAV, "calendar-multiget"), dav.N(dav.NSCalDAV, "calendar-query"),
+				dav.N(dav.NSDAV, "sync-collection")), http.StatusOK
 		}
 		return "", http.StatusOK
 	case pOwner:
@@ -206,6 +208,9 @@ func (s *Server) propValue(user string, res *resource, name xml.Name, req *dav.E
 			return strconv.Itoa(maxResourceSize), http.StatusOK
 		case pGetCTag:
 			return dav.Esc(strconv.FormatUint(res.col.SyncToken(), 10)), http.StatusOK
+		case pSyncToken:
+			// Live but not part of allprop (RFC 6578 §4).
+			return dav.Esc(formatSyncToken(res.col.SyncID(), res.col.SyncToken())), http.StatusOK
 		}
 		if v, ok := m.DeadProps[dav.Key(name)]; ok {
 			return v, http.StatusOK
@@ -269,7 +274,7 @@ func (s *Server) responseFor(user string, res *resource, reqProps []*dav.Element
 // protectedProps cannot be changed by PROPPATCH.
 var protectedProps = []xml.Name{
 	pResourceType, pCurrentUserPrincipal, pCurrentUserPrivSet, pSupportedReportSet, pOwner,
-	pGetETag, pGetContentType, pGetContentLength, pGetLastModified, pSupportedCompSet,
+	pGetETag, pSyncToken, pGetContentType, pGetContentLength, pGetLastModified, pSupportedCompSet,
 	pSupportedCalData, pMaxResourceSize, pGetCTag, pCalendarData, pPrincipalURL,
 	pCalendarHomeSet, pCalendarUserAddrSet,
 }

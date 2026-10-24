@@ -1,14 +1,17 @@
-// Package server is the HTTP front: routing, authentication and the WebDAV
-// / CalDAV methods on top of store, dav and caldav.
+// Package server is the HTTP front: routing, authentication and the
+// WebDAV / CalDAV / CardDAV methods on top of store, dav, caldav and carddav.
 //
 // URL layout:
 //
-//	/.well-known/caldav             -> 301 /dav/
-//	/dav/                           root (current-user-principal discovery)
-//	/dav/principals/<user>/         principal
-//	/dav/calendars/<user>/          calendar home
-//	/dav/calendars/<user>/<cal>/    calendar collection
-//	/dav/calendars/<user>/<cal>/<x> calendar object
+//	/.well-known/caldav, carddav       -> 301 /dav/
+//	/dav/                              root (current-user-principal discovery)
+//	/dav/principals/<user>/            principal
+//	/dav/calendars/<user>/             calendar home
+//	/dav/calendars/<user>/<cal>/       calendar collection
+//	/dav/calendars/<user>/<cal>/<x>    calendar object (.ics)
+//	/dav/addressbooks/<user>/          address book home
+//	/dav/addressbooks/<user>/<book>/   address book
+//	/dav/addressbooks/<user>/<book>/<x> contact (.vcf)
 package server
 
 import (
@@ -20,6 +23,7 @@ import (
 
 	"davd/internal/auth"
 	"davd/internal/caldav"
+	"davd/internal/carddav"
 	"davd/internal/config"
 	"davd/internal/store"
 )
@@ -45,8 +49,19 @@ var DefaultCalendars = map[string]store.Meta{
 	"journal": {DisplayName: "Journal", Components: []string{"VJOURNAL"}},
 }
 
+// DefaultAddressBooks are created in a user's address book home on first
+// access.
+var DefaultAddressBooks = map[string]store.Meta{
+	"contacts": {DisplayName: "Contacts"},
+}
+
 // UIDOf is the store.UIDFunc for this server.
-func UIDOf(_ store.Kind, data []byte) string { return caldav.UIDOf(data) }
+func UIDOf(k store.Kind, data []byte) string {
+	if k == store.AddressBooks {
+		return carddav.UIDOf(data)
+	}
+	return caldav.UIDOf(data)
+}
 
 type statusWriter struct {
 	http.ResponseWriter
@@ -84,7 +99,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (user string) {
 		return ""
 	case p == "/" && r.Method == http.MethodGet:
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte("davd: CalDAV server. Point your client at this host.\n"))
+		w.Write([]byte("davd: CalDAV/CardDAV server. Point your client at this host.\n"))
 		return ""
 	case p == "/" || p == "/dav" || strings.HasPrefix(p, "/dav/"):
 	default:
@@ -113,9 +128,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (user string) {
 	case "PROPPATCH":
 		s.proppatch(w, r, res)
 	case "MKCALENDAR":
-		s.mkcalendar(w, r, res, false)
+		s.mkcollection(w, r, res, false)
 	case "MKCOL":
-		s.mkcalendar(w, r, res, true)
+		s.mkcollection(w, r, res, true)
 	case http.MethodGet, http.MethodHead:
 		s.get(w, r, res)
 	case http.MethodPut:
@@ -135,7 +150,7 @@ const allowed = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, REPORT, M
 
 func (s *Server) options(w http.ResponseWriter) {
 	w.Header().Set("Allow", allowed)
-	w.Header().Set("DAV", "1, 3, calendar-access, extended-mkcol")
+	w.Header().Set("DAV", "1, 3, calendar-access, addressbook, extended-mkcol")
 	w.WriteHeader(http.StatusOK)
 }
 

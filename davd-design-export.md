@@ -22,7 +22,7 @@ Hand this file to a new session: "Read davd-design-export.md and continue from t
   - The server sends invitations itself and advertises `calendar-auto-schedule`.
   - RSVP uses the server's own HMAC-signed links (GET shows a confirmation page, POST records the answer), plus implicit scheduling for internal attendees. Receiving reply emails (IMAP, SMTP receiver, inbound webhook) is deferred.
   - Write our own RRULE expander with no dependencies, tested against ported test vectors. `teambition/rrule-go` is the fallback if this gets out of hand.
-- **Status (2026-10-23):** milestones 1–4 implemented (see README.md). Build via Makefile, deploy as a container behind a TLS-terminating reverse proxy. Tested with DAVx⁵. Next: milestone 5 (CardDAV).
+- **Status (2026-10-23):** milestones 1–5 implemented (see README.md). Build via Makefile, deploy as a container behind a TLS-terminating reverse proxy. Calendars tested with DAVx⁵. Next: milestone 6 (sharing).
 
 ---
 
@@ -82,6 +82,13 @@ data/
 - **Locking:** one `sync.RWMutex` per collection. Load indexes into memory at startup; at 100 users that's fine.
 - **Search:** none. Queries scan the collection.
 
+## 4b. CardDAV decisions (2026-10-23)
+
+- vCards are stored byte-exact; no 3.0 ↔ 4.0 conversion. `supported-address-data` advertises both, and `address-data` always returns the stored version.
+- A UID is required (`valid-address-data`); vCard 2.1 is rejected (`supported-address-data`).
+- Contact groups (Apple `X-ADDRESSBOOKSERVER-KIND/MEMBER`, vCard 4 `KIND/MEMBER`, `CATEGORIES`) are client data. The server doesn't validate, clean up or convert them.
+- Default address book: `contacts`.
+
 ## 5. Sharing (users and groups)
 
 ```json
@@ -93,6 +100,7 @@ data/
 
 - A PROPFIND on the sharee's home also lists the shared collection, with a displayname like `"work (alice)"`.
 - All access checks go through one function, `can(user, collection) -> none|read|write`, which also feeds `current-user-privilege-set`.
+- **Group principals (with milestone 6):** expose `config.yaml` groups as read-only principals `/dav/principals/groups/<group>/` with `DAV:group-member-set`, and `DAV:group-membership` on user principals. Used by sharing UIs and, in milestone 7, to expand `ATTENDEE;CUTYPE=GROUP` into one invitation per member.
 - Users and groups live in `config.yaml` and are reloaded on SIGHUP. A small admin page (`html/template`) can come later.
 
 ## 6. Invitations (iMIP) and RSVP
@@ -214,7 +222,8 @@ internal/
 7. **Scheduling:** attendee diffing, iMIP REQUEST and CANCEL (including per-instance), internal attendee copies and PARTSTAT merge-back.
 8. **RSVP links:** HMAC tokens, confirmation page, POST, PARTSTAT update, organizer notification.
 9. **Hardening:** client matrix tests, fuzzing, deployment behind a TLS-terminating reverse proxy.
-10. **(Optional) Admin UI:** users, groups and shares via `html/template`.
+10. **(Optional) Directory address book:** a generated, read-only address book with one vCard per user (name, email) and one group vCard per `config.yaml` group, for autocomplete and "invite family". About 150 lines; open question: in every user's home automatically, or opt-in.
+11. **(Optional) Admin UI:** users, groups and shares via `html/template`.
 
 Rough size: about 5–7k lines of Go.
 

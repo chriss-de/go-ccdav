@@ -1,12 +1,12 @@
 # davd
 
-A small self-hosted CalDAV server written in Go. It stores everything as plain files. Its only dependency outside the standard library is the YAML parser for the config file (`go.yaml.in/yaml/v3`). The design is in [`davd-design-export.md`](davd-design-export.md).
+A small self-hosted CalDAV and CardDAV server written in Go. It stores everything as plain files. Its only dependency outside the standard library is the YAML parser for the config file (`go.yaml.in/yaml/v3`). The design is in [`davd-design-export.md`](davd-design-export.md).
 
 ## Status
 
-Milestones 1–4 are implemented:
+Milestones 1–5 are implemented:
 
-- **Discovery:** `/.well-known/caldav`, principals, calendar homes and PROPFIND.
+- **Discovery:** `/.well-known/caldav` and `/.well-known/carddav`, principals, calendar and address book homes, and PROPFIND.
 - **Writes:**
   - PUT, GET and DELETE with ETag, `If-Match` and `If-None-Match`.
   - MKCALENDAR and extended MKCOL.
@@ -15,9 +15,10 @@ Milestones 1–4 are implemented:
 - **iCalendar parsing, an RRULE expander and timezone resolution** (IANA, Windows zone names, embedded VTIMEZONE).
 - **`calendar-query`:** comp, prop and param filters, `text-match`, and `time-range` on VEVENT, VTODO, VJOURNAL and VALARM, with recurrences expanded.
 - **`calendar-data`:** partial retrieval and `expand`.
+- **CardDAV (RFC 6352):** address books with `addressbook-query` (all match types and collations, `anyof`/`allof`, `limit`), `addressbook-multiget` and partial `address-data`. vCard 3.0 and 4.0 are stored exactly as uploaded, with no conversion between them. Contacts without a UID and vCard 2.1 are rejected. Contact groups are plain client data.
 - **Sync (RFC 6578):** the `sync-collection` report with `limit`, plus `DAV:sync-token` and `getctag`. Changes to calendar properties also move the token, so clients pick up renames and colour changes quickly.
 
-The following are not implemented yet: CardDAV (milestone 5), sharing (6), scheduling and iMIP (7), and RSVP (8).
+The following are not implemented yet: sharing (milestone 6), scheduling and iMIP (7), and RSVP (8).
 
 ## Run
 
@@ -27,7 +28,7 @@ make check        # gofmt check + vet + tests
 make fuzz         # every fuzz target, FUZZTIME=30s each
 ```
 
-Point a client at `http://localhost:8080/`. Discovery goes through `/.well-known/caldav`, which redirects to `/dav/`.
+Point a client at `http://localhost:8080/`. Discovery goes through `/.well-known/caldav` or `/.well-known/carddav`, both of which redirect to `/dav/`. Each user starts with the calendars `default`, `tasks` and `journal`, and the address book `contacts`.
 
 ## Configuration
 
@@ -72,5 +73,6 @@ internal/ical       content-line parser/encoder (iCalendar + vCard)
 internal/rrule      RRULE expansion, timezone resolution, recurrence sets
 internal/dav        XML parsing, multistatus writer
 internal/caldav     validation, calendar-query filters, calendar-data / expand
+internal/carddav    vCard validation, addressbook-query filters, address-data
 internal/server     routing, resources, properties, HTTP methods
 ```

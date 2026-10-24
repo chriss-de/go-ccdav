@@ -42,10 +42,10 @@ func parseSyncToken(tok, id string) (uint64, error) {
 }
 
 // syncCollection implements the DAV:sync-collection REPORT (RFC 6578) on
-// calendar collections, with sync-level 1.
+// calendars and address books, with sync-level 1.
 func (s *Server) syncCollection(w http.ResponseWriter, user string, res *resource, body *dav.Element) {
-	if res.kind != kCalendar || res.col == nil {
-		dav.WriteError(w, http.StatusForbidden, dav.N(dav.NSDAV, "supported-report"), "sync-collection is only supported on calendars")
+	if res.kind != kCollection || res.col == nil {
+		dav.WriteError(w, http.StatusForbidden, dav.N(dav.NSDAV, "supported-report"), "sync-collection is only supported on calendars and address books")
 		return
 	}
 	if lvl := strings.TrimSpace(body.Child(dav.NSDAV, "sync-level").Text); lvl != "" && lvl != "1" && lvl != "infinite" {
@@ -93,12 +93,11 @@ func (s *Server) syncCollection(w http.ResponseWriter, user string, res *resourc
 	}
 	props := propElements(body)
 	for _, c := range changes {
-		o := &resource{kind: kCalObject, owner: res.owner, colName: res.colName, col: col, name: c.Name}
 		// The current state wins over the logged operation.
 		if info, err := col.Stat(c.Name); err == nil {
-			o.info, o.exists = info, true
-			ms.Responses = append(ms.Responses, s.responseFor(user, o, props, false))
+			ms.Responses = append(ms.Responses, s.responseFor(user, res.object(info, true), props, false))
 		} else {
+			o := res.object(store.ObjectInfo{Name: c.Name}, false)
 			ms.Responses = append(ms.Responses, &dav.Response{Href: o.href(), Status: http.StatusNotFound})
 		}
 	}

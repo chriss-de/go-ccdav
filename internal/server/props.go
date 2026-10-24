@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"davd/internal/caldav"
+	"davd/internal/carddav"
 	"davd/internal/dav"
 	"davd/internal/store"
 )
@@ -33,8 +34,13 @@ var (
 	pCalendarTimezone      = dav.N(dav.NSCalDAV, "calendar-timezone")
 	pSupportedCompSet      = dav.N(dav.NSCalDAV, "supported-calendar-component-set")
 	pSupportedCalData      = dav.N(dav.NSCalDAV, "supported-calendar-data")
-	pMaxResourceSize       = dav.N(dav.NSCalDAV, "max-resource-size")
+	pCalMaxResourceSize    = dav.N(dav.NSCalDAV, "max-resource-size")
 	pCalendarData          = dav.N(dav.NSCalDAV, "calendar-data")
+	pAddressbookHomeSet    = dav.N(dav.NSCardDAV, "addressbook-home-set")
+	pAddressbookDesc       = dav.N(dav.NSCardDAV, "addressbook-description")
+	pSupportedAddrData     = dav.N(dav.NSCardDAV, "supported-address-data")
+	pCardMaxResourceSize   = dav.N(dav.NSCardDAV, "max-resource-size")
+	pAddressData           = dav.N(dav.NSCardDAV, "address-data")
 	pGetCTag               = dav.N(dav.NSCS, "getctag")
 	pEmailAddressSet       = dav.N(dav.NSCS, "email-address-set")
 	pCalendarColor         = dav.N(dav.NSApple, "calendar-color")
@@ -48,15 +54,20 @@ func (s *Server) allProps(res *resource) []xml.Name {
 	switch res.kind {
 	case kPrincipal:
 		return append(common, pDisplayName, pPrincipalURL, pPrincipalCollSet, pCalendarHomeSet,
-			pCalendarUserAddrSet, pCalendarUserType, pEmailAddressSet)
-	case kCalHome:
+			pAddressbookHomeSet, pCalendarUserAddrSet, pCalendarUserType, pEmailAddressSet)
+	case kHome:
 		return append(common, pOwner, pDisplayName)
-	case kCalendar:
-		names := append(common, pOwner, pDisplayName, pCalendarDescription, pCalendarColor,
-			pCalendarOrder, pSupportedCompSet, pSupportedCalData, pMaxResourceSize, pGetCTag)
+	case kCollection:
+		names := append(common, pOwner, pDisplayName, pGetCTag)
+		if res.isCalendar() {
+			names = append(names, pCalendarDescription, pCalendarColor, pCalendarOrder,
+				pSupportedCompSet, pSupportedCalData, pCalMaxResourceSize)
+		} else {
+			names = append(names, pAddressbookDesc, pSupportedAddrData, pCardMaxResourceSize)
+		}
 		if res.col != nil {
 			m := res.col.Meta()
-			if m.Timezone != "" {
+			if m.Timezone != "" && res.isCalendar() {
 				names = append(names, pCalendarTimezone)
 			}
 			for k := range m.DeadProps {
@@ -64,7 +75,7 @@ func (s *Server) allProps(res *resource) []xml.Name {
 			}
 		}
 		return names
-	case kCalObject:
+	case kObject:
 		return []xml.Name{pResourceType, pGetETag, pGetContentType, pGetContentLength, pGetLastModified}
 	}
 	return common
@@ -95,20 +106,23 @@ func reports(names ...xml.Name) string {
 }
 
 // propValue returns the raw XML value of one property and a status.
-// req is the requesting element (for calendar-data with sub-elements).
+// req is the requesting element (for calendar-data / address-data with
+// sub-elements).
 func (s *Server) propValue(user string, res *resource, name xml.Name, req *dav.Element) (string, int) {
-	cfg := s.cfg.Get()
 	switch name {
 	case pCurrentUserPrincipal:
 		return hrefs(principalHref(user)), http.StatusOK
 	case pResourceType:
 		switch res.kind {
-		case kCalObject:
+		case kObject:
 			return "", http.StatusOK
 		case kPrincipal:
 			return resourceTypeCollection + dav.E(dav.N(dav.NSDAV, "principal"), ""), http.StatusOK
-		case kCalendar:
-			return resourceTypeCollection + dav.E(dav.N(dav.NSCalDAV, "calendar"), ""), http.StatusOK
+		case kCollection:
+			if res.isCalendar() {
+				return resourceTypeCollection + dav.E(dav.N(dav.NSCalDAV, "calendar"), ""), http.StatusOK
+			}
+			return resourceTypeCollection + dav.E(dav.N(dav.NSCardDAV, "addressbook"), ""), http.StatusOK
 		}
 		return resourceTypeCollection, http.StatusOK
 	case pCurrentUserPrivSet:
@@ -118,80 +132,107 @@ func (s *Server) propValue(user string, res *resource, name xml.Name, req *dav.E
 		return privileges("all", "read", "write", "write-properties", "write-content",
 			"read-current-user-privilege-set", "bind", "unbind"), http.StatusOK
 	case pSupportedReportSet:
-		if res.kind == kCalendar || res.kind == kCalObject {
+		switch {
+		case res.kind != kCollection && res.kind != kObject:
+			return "", http.StatusOK
+		case res.isCalendar():
 			return reports(dav.N(dav.NSCalDAV, "calendar-multiget"), dav.N(dav.NSCalDAV, "calendar-query"),
 				dav.N(dav.NSDAV, "sync-collection")), http.StatusOK
+		default:
+			return reports(dav.N(dav.NSCardDAV, "addressbook-multiget"), dav.N(dav.NSCardDAV, "addressbook-query"),
+				dav.N(dav.NSDAV, "sync-collection")), http.StatusOK
 		}
-		return "", http.StatusOK
 	case pOwner:
-		if res.kind == kCalHome || res.kind == kCalendar || res.kind == kCalObject {
+		if res.kind == kHome || res.kind == kCollection || res.kind == kObject {
 			return hrefs(principalHref(res.owner)), http.StatusOK
 		}
 	}
 
 	switch res.kind {
 	case kPrincipal:
-		u := cfg.Users[res.owner]
-		switch name {
-		case pDisplayName:
-			dn := u.Name
-			if dn == "" {
-				dn = res.owner
-			}
-			return dav.Esc(dn), http.StatusOK
-		case pPrincipalURL:
-			return hrefs(principalHref(res.owner)), http.StatusOK
-		case pPrincipalCollSet:
-			return hrefs("/dav/principals/"), http.StatusOK
-		case pCalendarHomeSet:
-			return hrefs(calHomeHref(res.owner)), http.StatusOK
-		case pCalendarUserAddrSet:
-			v := ""
-			if u.Email != "" {
-				v = dav.Href("mailto:" + u.Email)
-			}
-			return v + hrefs(principalHref(res.owner)), http.StatusOK
-		case pCalendarUserType:
-			return "INDIVIDUAL", http.StatusOK
-		case pEmailAddressSet:
-			if u.Email == "" {
-				return "", http.StatusNotFound
-			}
-			return dav.T(dav.N(dav.NSCS, "email-address"), u.Email), http.StatusOK
-		}
-	case kCalHome:
+		return s.principalProp(res, name)
+	case kHome:
 		if name == pDisplayName {
 			return dav.Esc(res.owner), http.StatusOK
 		}
-	case kCalendar:
-		if res.col == nil {
+	case kCollection:
+		if res.col != nil {
+			return collectionProp(res, name)
+		}
+	case kObject:
+		if res.exists {
+			return objectProp(res, name, req)
+		}
+	}
+	return "", http.StatusNotFound
+}
+
+func (s *Server) principalProp(res *resource, name xml.Name) (string, int) {
+	u := s.cfg.Get().Users[res.owner]
+	switch name {
+	case pDisplayName:
+		dn := u.Name
+		if dn == "" {
+			dn = res.owner
+		}
+		return dav.Esc(dn), http.StatusOK
+	case pPrincipalURL:
+		return hrefs(principalHref(res.owner)), http.StatusOK
+	case pPrincipalCollSet:
+		return hrefs("/dav/principals/"), http.StatusOK
+	case pCalendarHomeSet:
+		return hrefs(homeHref(store.Calendars, res.owner)), http.StatusOK
+	case pAddressbookHomeSet:
+		return hrefs(homeHref(store.AddressBooks, res.owner)), http.StatusOK
+	case pCalendarUserAddrSet:
+		v := ""
+		if u.Email != "" {
+			v = dav.Href("mailto:" + u.Email)
+		}
+		return v + hrefs(principalHref(res.owner)), http.StatusOK
+	case pCalendarUserType:
+		return "INDIVIDUAL", http.StatusOK
+	case pEmailAddressSet:
+		if u.Email == "" {
 			return "", http.StatusNotFound
 		}
-		m := res.col.Meta()
+		return dav.T(dav.N(dav.NSCS, "email-address"), u.Email), http.StatusOK
+	}
+	return "", http.StatusNotFound
+}
+
+func optional(v string) (string, int) {
+	if v == "" {
+		return "", http.StatusNotFound
+	}
+	return dav.Esc(v), http.StatusOK
+}
+
+func collectionProp(res *resource, name xml.Name) (string, int) {
+	m := res.col.Meta()
+	switch name {
+	case pDisplayName:
+		dn := m.DisplayName
+		if dn == "" {
+			dn = res.colName
+		}
+		return dav.Esc(dn), http.StatusOK
+	case pGetCTag:
+		return dav.Esc(strconv.FormatUint(res.col.SyncToken(), 10)), http.StatusOK
+	case pSyncToken:
+		// Live but not part of allprop (RFC 6578 §4).
+		return dav.Esc(formatSyncToken(res.col.SyncID(), res.col.SyncToken())), http.StatusOK
+	}
+	if res.isCalendar() {
 		switch name {
-		case pDisplayName:
-			dn := m.DisplayName
-			if dn == "" {
-				dn = res.colName
-			}
-			return dav.Esc(dn), http.StatusOK
 		case pCalendarDescription:
 			return dav.Esc(m.Description), http.StatusOK
 		case pCalendarColor:
-			if m.Color == "" {
-				return "", http.StatusNotFound
-			}
-			return dav.Esc(m.Color), http.StatusOK
+			return optional(m.Color)
 		case pCalendarOrder:
-			if m.Order == "" {
-				return "", http.StatusNotFound
-			}
-			return dav.Esc(m.Order), http.StatusOK
+			return optional(m.Order)
 		case pCalendarTimezone:
-			if m.Timezone == "" {
-				return "", http.StatusNotFound
-			}
-			return dav.Esc(m.Timezone), http.StatusOK
+			return optional(m.Timezone)
 		case pSupportedCompSet:
 			comps := m.Components
 			if len(comps) == 0 {
@@ -204,48 +245,61 @@ func (s *Server) propValue(user string, res *resource, name xml.Name, req *dav.E
 			return sb.String(), http.StatusOK
 		case pSupportedCalData:
 			return `<cal:calendar-data content-type="text/calendar" version="2.0"/>`, http.StatusOK
-		case pMaxResourceSize:
+		case pCalMaxResourceSize:
 			return strconv.Itoa(maxResourceSize), http.StatusOK
-		case pGetCTag:
-			return dav.Esc(strconv.FormatUint(res.col.SyncToken(), 10)), http.StatusOK
-		case pSyncToken:
-			// Live but not part of allprop (RFC 6578 §4).
-			return dav.Esc(formatSyncToken(res.col.SyncID(), res.col.SyncToken())), http.StatusOK
 		}
-		if v, ok := m.DeadProps[dav.Key(name)]; ok {
-			return v, http.StatusOK
+	} else {
+		switch name {
+		case pAddressbookDesc:
+			return dav.Esc(m.Description), http.StatusOK
+		case pSupportedAddrData:
+			return `<card:address-data-type content-type="text/vcard" version="3.0"/>` +
+				`<card:address-data-type content-type="text/vcard" version="4.0"/>`, http.StatusOK
+		case pCardMaxResourceSize:
+			return strconv.Itoa(maxResourceSize), http.StatusOK
 		}
-	case kCalObject:
-		if !res.exists {
+	}
+	if v, ok := m.DeadProps[dav.Key(name)]; ok {
+		return v, http.StatusOK
+	}
+	return "", http.StatusNotFound
+}
+
+func objectProp(res *resource, name xml.Name, req *dav.Element) (string, int) {
+	switch name {
+	case pGetETag:
+		return dav.Esc(res.info.ETag), http.StatusOK
+	case pGetContentType:
+		return kinds[res.sk].contentType, http.StatusOK
+	case pGetContentLength:
+		return strconv.FormatInt(res.info.Size, 10), http.StatusOK
+	case pGetLastModified:
+		return res.info.ModTime.Format(http.TimeFormat), http.StatusOK
+	case pCalendarData, pAddressData:
+		if (name == pCalendarData) != res.isCalendar() {
 			return "", http.StatusNotFound
 		}
-		switch name {
-		case pGetETag:
-			return dav.Esc(res.info.ETag), http.StatusOK
-		case pGetContentType:
-			return "text/calendar; charset=utf-8", http.StatusOK
-		case pGetContentLength:
-			return strconv.FormatInt(res.info.Size, 10), http.StatusOK
-		case pGetLastModified:
-			return res.info.ModTime.Format(http.TimeFormat), http.StatusOK
-		case pCalendarData:
-			data, _, err := res.col.Get(res.name)
-			if err != nil {
-				return "", http.StatusNotFound
-			}
-			out, err := caldav.RenderData(data, req, caldav.FloatingZone(res.col.Meta().Timezone))
-			if err != nil {
-				return "", http.StatusInternalServerError
-			}
-			return dav.Esc(out), http.StatusOK
+		data, _, err := res.col.Get(res.name)
+		if err != nil {
+			return "", http.StatusNotFound
 		}
+		var out string
+		if res.isCalendar() {
+			out, err = caldav.RenderData(data, req, caldav.FloatingZone(res.col.Meta().Timezone))
+		} else {
+			out, err = carddav.RenderData(data, req)
+		}
+		if err != nil {
+			return "", http.StatusInternalServerError
+		}
+		return dav.Esc(out), http.StatusOK
 	}
 	return "", http.StatusNotFound
 }
 
 // responseFor builds a DAV:response for the requested properties. With
-// names == nil (allprop) the live properties are returned; propNamesOnly
-// returns empty elements (propname).
+// reqProps == nil (allprop) the live properties are returned;
+// propNamesOnly returns empty elements (propname).
 func (s *Server) responseFor(user string, res *resource, reqProps []*dav.Element, propNamesOnly bool) *dav.Response {
 	resp := &dav.Response{Href: res.href()}
 	if reqProps == nil {
@@ -275,13 +329,14 @@ func (s *Server) responseFor(user string, res *resource, reqProps []*dav.Element
 var protectedProps = []xml.Name{
 	pResourceType, pCurrentUserPrincipal, pCurrentUserPrivSet, pSupportedReportSet, pOwner,
 	pGetETag, pSyncToken, pGetContentType, pGetContentLength, pGetLastModified, pSupportedCompSet,
-	pSupportedCalData, pMaxResourceSize, pGetCTag, pCalendarData, pPrincipalURL,
-	pCalendarHomeSet, pCalendarUserAddrSet,
+	pSupportedCalData, pCalMaxResourceSize, pGetCTag, pCalendarData, pPrincipalURL,
+	pCalendarHomeSet, pCalendarUserAddrSet, pAddressbookHomeSet, pSupportedAddrData,
+	pCardMaxResourceSize, pAddressData,
 }
 
-// applyProp sets (value != nil) or removes one collection property on m.
-// It returns an HTTP status for the propstat.
-func applyProp(m *store.Meta, name xml.Name, el *dav.Element, remove bool) int {
+// applyProp sets or removes one collection property on m. It returns an
+// HTTP status for the propstat.
+func applyProp(m *store.Meta, sk store.Kind, name xml.Name, el *dav.Element, remove bool) int {
 	if slices.Contains(protectedProps, name) {
 		return http.StatusForbidden
 	}
@@ -289,22 +344,25 @@ func applyProp(m *store.Meta, name xml.Name, el *dav.Element, remove bool) int {
 	if el != nil {
 		text = el.Text
 	}
-	switch name {
-	case pDisplayName:
+	cal := sk == store.Calendars
+	switch {
+	case name == pDisplayName:
 		m.DisplayName = text
-	case pCalendarDescription:
+	case name == pCalendarDescription && cal, name == pAddressbookDesc && !cal:
 		m.Description = text
-	case pCalendarColor:
+	case name == pCalendarColor && cal:
 		m.Color = strings.TrimSpace(text)
-	case pCalendarOrder:
+	case name == pCalendarOrder && cal:
 		m.Order = strings.TrimSpace(text)
-	case pCalendarTimezone:
+	case name == pCalendarTimezone && cal:
 		if !remove {
 			if err := caldav.ValidTimezone(text); err != nil {
 				return http.StatusForbidden
 			}
 		}
 		m.Timezone = text
+	case name.Space == dav.NSCalDAV && !cal, name.Space == dav.NSCardDAV && cal:
+		return http.StatusForbidden // the other protocol's properties
 	default:
 		if remove {
 			delete(m.DeadProps, dav.Key(name))

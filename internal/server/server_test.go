@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -386,4 +388,148 @@ func TestSyncCollection(t *testing.T) {
 
 	// Not on the home.
 	alice.expect("REPORT", "/dav/calendars/alice/", syncReport("", 0), http.StatusForbidden)
+}
+
+func fixture(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestCardDAVDiscovery(t *testing.T) {
+	alice, _ := newTestServer(t)
+	resp, _ := alice.expect("GET", "/.well-known/carddav", "", http.StatusMovedPermanently)
+	if resp.Header.Get("Location") != "/dav/" {
+		t.Fatal(resp.Header.Get("Location"))
+	}
+	resp, _ = alice.expect("OPTIONS", "/dav/", "", http.StatusOK)
+	contains(t, resp.Header.Get("DAV"), "addressbook")
+
+	_, out := alice.expect("PROPFIND", "/dav/principals/alice/", `<d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav"><d:prop><card:addressbook-home-set/></d:prop></d:propfind>`, http.StatusMultiStatus, "Depth", "0")
+	contains(t, out, "<card:addressbook-home-set><d:href>/dav/addressbooks/alice/</d:href>")
+
+	_, out = alice.expect("PROPFIND", "/dav/addressbooks/alice/", `<d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav" xmlns:cal="urn:ietf:params:xml:ns:caldav"><d:prop>
+		<d:resourcetype/><d:displayname/><card:supported-address-data/><card:max-resource-size/><d:supported-report-set/><cal:supported-calendar-component-set/></d:prop></d:propfind>`,
+		http.StatusMultiStatus, "Depth", "1")
+	contains(t, out, "/dav/addressbooks/alice/contacts/", "<card:addressbook/>", "<d:displayname>Contacts</d:displayname>",
+		`version="3.0"`, `version="4.0"`, "<card:addressbook-query/>", "<card:addressbook-multiget/>", "<d:sync-collection/>")
+	notContains(t, out, "<cal:calendar/>", "<cal:comp")
+
+	// The root lists both homes.
+	_, out = alice.expect("PROPFIND", "/dav/", "", http.StatusMultiStatus, "Depth", "1")
+	contains(t, out, "/dav/calendars/", "/dav/addressbooks/")
+}
+
+func TestCardDAVObjects(t *testing.T) {
+	alice, bob := newTestServer(t)
+	book := "/dav/addressbooks/alice/contacts/"
+	for _, f := range []string{"apple-contact.vcf", "apple-group.vcf", "davx5-contact.vcf", "thunderbird-contact.vcf"} {
+		resp, _ := alice.expect("PUT", book+f, fixture(t, f), http.StatusCreated, "Content-Type", "text/vcard; charset=utf-8", "If-None-Match", "*")
+		if resp.Header.Get("ETag") == "" {
+			t.Fatal("no etag")
+		}
+		resp, got := alice.expect("GET", book+f, "", http.StatusOK)
+		if got != fixture(t, f) || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/vcard") {
+			t.Fatalf("%s: round trip mismatch (%s)", f, resp.Header.Get("Content-Type"))
+		}
+	}
+
+	// Large inline photo (~400 KB).
+	photo := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xff, 0xd8, 0x42}, 100_000))
+	big := "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:photo-1\r\nFN:With Photo\r\nPHOTO;ENCODING=b;TYPE=JPEG:" + photo + "\r\nEND:VCARD\r\n"
+	alice.expect("PUT", book+"photo.vcf", big, http.StatusCreated)
+	if _, got := alice.expect("GET", book+"photo.vcf", "", http.StatusOK); got != big {
+		t.Fatal("photo round trip")
+	}
+
+	// Rejections.
+	apple := fixture(t, "apple-contact.vcf")
+	_, out := alice.expect("PUT", book+"dup.vcf", apple, http.StatusConflict)
+	contains(t, out, "no-uid-conflict", "apple-contact.vcf", "urn:ietf:params:xml:ns:carddav")
+	_, out = alice.expect("PUT", book+"v21.vcf", strings.Replace(strings.Replace(apple, "VERSION:3.0", "VERSION:2.1", 1), "F1A2", "X1A2", 1), http.StatusForbidden)
+	contains(t, out, "supported-address-data")
+	_, out = alice.expect("PUT", book+"nouid.vcf", "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:x\r\nEND:VCARD\r\n", http.StatusForbidden)
+	contains(t, out, "valid-address-data")
+	alice.expect("PUT", book+"x.vcf", apple, http.StatusUnsupportedMediaType, "Content-Type", "text/calendar")
+	alice.expect("PUT", "/dav/calendars/alice/default/x.ics", apple, http.StatusForbidden) // vCard into a calendar
+	alice.expect("PUT", book+"x.vcf", event("x", "20260101T100000Z", ""), http.StatusForbidden)
+	bob.expect("GET", book+"apple-contact.vcf", "", http.StatusForbidden)
+
+	// multiget: only address objects; calendar hrefs are not served here.
+	alice.expect("PUT", "/dav/calendars/alice/default/ev.ics", event("ev", "20260101T100000Z", ""), http.StatusCreated)
+	_, out = alice.expect("REPORT", book, `<card:addressbook-multiget xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+<d:prop><d:getetag/><card:address-data/></d:prop>
+<d:href>`+book+`davx5-contact.vcf</d:href><d:href>/dav/calendars/alice/default/ev.ics</d:href></card:addressbook-multiget>`, http.StatusMultiStatus)
+	contains(t, out, "FN:Max Mustermann", "ev.ics</d:href><d:status>HTTP/1.1 404")
+
+	// Collection management: extended MKCOL, PROPPATCH, DELETE.
+	alice.expect("MKCOL", "/dav/addressbooks/alice/work/", `<d:mkcol xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav"><d:set><d:prop>
+		<d:resourcetype><d:collection/><card:addressbook/></d:resourcetype><d:displayname>Work</d:displayname>
+		<card:addressbook-description>Colleagues</card:addressbook-description></d:prop></d:set></d:mkcol>`, http.StatusCreated)
+	alice.expect("MKCOL", "/dav/addressbooks/alice/cal/", `<d:mkcol xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:set><d:prop>
+		<d:resourcetype><d:collection/><c:calendar/></d:resourcetype></d:prop></d:set></d:mkcol>`, http.StatusForbidden)
+	alice.expect("MKCALENDAR", "/dav/addressbooks/alice/cal/", "", http.StatusForbidden)
+	_, out = alice.expect("PROPPATCH", "/dav/addressbooks/alice/work/", `<d:propertyupdate xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+		<d:set><d:prop><d:displayname>Job</d:displayname><c:calendar-timezone>x</c:calendar-timezone></d:prop></d:set></d:propertyupdate>`, http.StatusMultiStatus)
+	contains(t, out, "403 Forbidden", "424 Failed Dependency")
+	_, out = alice.expect("PROPFIND", "/dav/addressbooks/alice/work/", "", http.StatusMultiStatus, "Depth", "0")
+	contains(t, out, "<d:displayname>Work</d:displayname>", "<card:addressbook-description>Colleagues</card:addressbook-description>")
+	alice.expect("DELETE", "/dav/addressbooks/alice/work/", "", http.StatusNoContent)
+
+	// sync-collection works on address books too.
+	_, out = alice.expect("REPORT", book, syncReport("", 0), http.StatusMultiStatus)
+	contains(t, out, "apple-group.vcf", "photo.vcf")
+	tok := tokenOf(t, out)
+	alice.expect("DELETE", book+"apple-group.vcf", "", http.StatusNoContent)
+	_, out = alice.expect("REPORT", book, syncReport(tok, 0), http.StatusMultiStatus)
+	contains(t, out, "apple-group.vcf</d:href><d:status>HTTP/1.1 404")
+}
+
+func TestAddressbookQuery(t *testing.T) {
+	alice, _ := newTestServer(t)
+	book := "/dav/addressbooks/alice/contacts/"
+	for _, f := range []string{"apple-contact.vcf", "apple-group.vcf", "davx5-contact.vcf", "thunderbird-contact.vcf"} {
+		alice.expect("PUT", book+f, fixture(t, f), http.StatusCreated)
+	}
+	q := func(filter, extra string) string {
+		return `<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav"><d:prop><d:getetag/>` + extra + `</d:prop>` + filter + `</card:addressbook-query>`
+	}
+	for _, c := range []struct {
+		filter string
+		want   []string
+	}{
+		{`<card:filter/>`, []string{"apple-contact", "apple-group", "davx5-contact", "thunderbird-contact"}},
+		{`<card:filter><card:prop-filter name="EMAIL"><card:text-match match-type="ends-with">example.org</card:text-match></card:prop-filter></card:filter>`, []string{"davx5-contact"}},
+		{`<card:filter><card:prop-filter name="FN"><card:text-match>muster</card:text-match></card:prop-filter></card:filter>`, []string{"davx5-contact", "thunderbird-contact"}},
+		{`<card:filter><card:prop-filter name="X-ADDRESSBOOKSERVER-KIND"><card:text-match match-type="equals">group</card:text-match></card:prop-filter></card:filter>`, []string{"apple-group"}},
+		{`<card:filter test="allof"><card:prop-filter name="FN"><card:text-match>muster</card:text-match></card:prop-filter><card:prop-filter name="CATEGORIES"><card:text-match>sport</card:text-match></card:prop-filter></card:filter>`, []string{"davx5-contact"}},
+		{`<card:filter><card:prop-filter name="TEL"><card:param-filter name="TYPE"><card:text-match match-type="equals">cell</card:text-match></card:param-filter></card:prop-filter></card:filter>`, []string{"apple-contact"}},
+	} {
+		_, out := alice.expect("REPORT", book, q(c.filter, ""), http.StatusMultiStatus, "Depth", "1")
+		if got := strings.Count(out, "<d:response>"); got != len(c.want) {
+			t.Errorf("%s: %d results, want %v\n%s", c.filter, got, c.want, out)
+		}
+		contains(t, out, c.want...)
+	}
+
+	// Partial address-data.
+	_, out := alice.expect("REPORT", book, q(`<card:filter><card:prop-filter name="UID"><card:text-match match-type="starts-with">3b8e</card:text-match></card:prop-filter></card:filter>`,
+		`<card:address-data><card:prop name="FN"/></card:address-data>`), http.StatusMultiStatus, "Depth", "1")
+	contains(t, out, "FN:Max Mustermann", "UID:3b8e1c1e")
+	notContains(t, out, "EMAIL", "CATEGORIES")
+
+	// limit → 507 marker.
+	_, out = alice.expect("REPORT", book, q(`<card:filter/><card:limit><card:nresults>2</card:nresults></card:limit>`, ""), http.StatusMultiStatus, "Depth", "1")
+	if strings.Count(out, ".vcf</d:href>") != 2 {
+		t.Errorf("limit not applied:\n%s", out)
+	}
+	contains(t, out, "507 Insufficient Storage")
+
+	// Bad filter, and a calendar-query on an address book.
+	_, out = alice.expect("REPORT", book, q(`<card:filter><card:prop-filter name="FN"><card:text-match match-type="regex">x</card:text-match></card:prop-filter></card:filter>`, ""), http.StatusForbidden, "Depth", "1")
+	contains(t, out, "valid-filter")
+	alice.expect("REPORT", book, query("20260101T000000Z", "20270101T000000Z"), http.StatusForbidden, "Depth", "1")
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"davd/internal/caldav"
+	"davd/internal/carddav"
 	"davd/internal/dav"
 	"davd/internal/ical"
 	"davd/internal/store"
@@ -19,7 +20,7 @@ import (
 func badRequest(w http.ResponseWriter, msg string) { http.Error(w, msg, http.StatusBadRequest) }
 
 func (s *Server) propfind(w http.ResponseWriter, r *http.Request, res *resource) {
-	if res.kind == kCalendar && res.col == nil || res.kind == kCalObject && !res.exists {
+	if res.kind == kCollection && res.col == nil || res.kind == kObject && !res.exists {
 		http.NotFound(w, r)
 		return
 	}
@@ -102,8 +103,8 @@ func (s *Server) proppatch(w http.ResponseWriter, r *http.Request, res *resource
 	}
 	els, removes := parseSetRemove(body)
 	resp := &dav.Response{Href: res.href()}
-	if res.kind != kCalendar || res.col == nil {
-		if res.kind == kCalendar || res.kind == kCalObject && !res.exists {
+	if res.kind != kCollection || res.col == nil {
+		if res.kind == kCollection || res.kind == kObject && !res.exists {
 			http.NotFound(w, r)
 			return
 		}
@@ -121,7 +122,7 @@ func (s *Server) proppatch(w http.ResponseWriter, r *http.Request, res *resource
 		trial := *m
 		trial.DeadProps = maps.Clone(m.DeadProps)
 		for i, el := range els {
-			statuses[i] = applyProp(&trial, el.Name, el, removes[i])
+			statuses[i] = applyProp(&trial, res.sk, el.Name, el, removes[i])
 			failed = failed || statuses[i] != http.StatusOK
 		}
 		if !failed {
@@ -142,11 +143,11 @@ func (s *Server) proppatch(w http.ResponseWriter, r *http.Request, res *resource
 	(&dav.Multistatus{Responses: []*dav.Response{resp}}).Write(w)
 }
 
-// mkcalendar handles MKCALENDAR (RFC 4791 §5.3.1) and extended MKCOL
-// (RFC 5689) with a calendar resourcetype.
-func (s *Server) mkcalendar(w http.ResponseWriter, r *http.Request, res *resource, extended bool) {
-	if res.kind != kCalendar {
-		http.Error(w, "calendars can only be created in the calendar home", http.StatusForbidden)
+// mkcollection handles MKCALENDAR (RFC 4791 §5.3.1) and extended MKCOL
+// (RFC 5689) with a calendar or addressbook resourcetype matching the home.
+func (s *Server) mkcollection(w http.ResponseWriter, r *http.Request, res *resource, extended bool) {
+	if res.kind != kCollection || !extended && !res.isCalendar() {
+		http.Error(w, "collections can only be created directly in a home of the matching type", http.StatusForbidden)
 		return
 	}
 	if res.col != nil {
@@ -179,18 +180,22 @@ func (s *Server) mkcalendar(w http.ResponseWriter, r *http.Request, res *resourc
 		}
 	}
 	m := store.Meta{}
-	isCalendar := !extended
+	typed := !extended // MKCALENDAR implies the type; MKCOL must name it
 	resp := &dav.Response{Href: res.href()}
 	failed := false
 	for _, el := range els {
 		st := http.StatusOK
-		switch el.Name {
-		case pResourceType:
-			isCalendar = el.Child(dav.NSCalDAV, "calendar") != nil
-			if !isCalendar {
+		switch {
+		case el.Name == pResourceType:
+			if res.isCalendar() {
+				typed = el.Child(dav.NSCalDAV, "calendar") != nil
+			} else {
+				typed = el.Child(dav.NSCardDAV, "addressbook") != nil
+			}
+			if !typed {
 				st = http.StatusForbidden
 			}
-		case pSupportedCompSet:
+		case el.Name == pSupportedCompSet && res.isCalendar():
 			for _, c := range el.ChildrenNamed(dav.NSCalDAV, "comp") {
 				name := strings.ToUpper(c.Attr("name"))
 				if !isKnownComp(name) {
@@ -199,13 +204,13 @@ func (s *Server) mkcalendar(w http.ResponseWriter, r *http.Request, res *resourc
 				m.Components = append(m.Components, name)
 			}
 		default:
-			st = applyProp(&m, el.Name, el, false)
+			st = applyProp(&m, res.sk, el.Name, el, false)
 		}
 		failed = failed || st != http.StatusOK
 		resp.AddProp(st, dav.Prop{Name: el.Name})
 	}
-	if extended && !isCalendar {
-		http.Error(w, "only calendar collections can be created", http.StatusForbidden)
+	if !typed {
+		http.Error(w, "only calendar or address book collections can be created", http.StatusForbidden)
 		return
 	}
 	if failed {
@@ -220,7 +225,7 @@ func (s *Server) mkcalendar(w http.ResponseWriter, r *http.Request, res *resourc
 		(&dav.Multistatus{Responses: []*dav.Response{resp}}).Write(w)
 		return
 	}
-	if _, err := s.store.CreateCollection(res.owner, store.Calendars, res.colName, m); err != nil {
+	if _, err := s.store.CreateCollection(res.owner, res.sk, res.colName, m); err != nil {
 		if errors.Is(err, store.ErrExists) {
 			http.Error(w, "already exists", http.StatusMethodNotAllowed)
 			return
@@ -241,9 +246,9 @@ func isKnownComp(name string) bool {
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request, res *resource) {
-	if res.kind != kCalObject {
+	if res.kind != kObject {
 		w.Header().Set("Allow", "OPTIONS, PROPFIND, PROPPATCH, REPORT, DELETE")
-		http.Error(w, "GET is only supported on calendar objects", http.StatusMethodNotAllowed)
+		http.Error(w, "GET is only supported on calendar objects and contacts", http.StatusMethodNotAllowed)
 		return
 	}
 	if !res.exists {
@@ -256,7 +261,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, res *resource) {
 		return
 	}
 	h := w.Header()
-	h.Set("Content-Type", "text/calendar; charset=utf-8")
+	h.Set("Content-Type", kinds[res.sk].contentType)
 	h.Set("ETag", info.ETag)
 	h.Set("Last-Modified", info.ModTime.Format(http.TimeFormat))
 	h.Set("Content-Length", strconv.Itoa(len(data)))
@@ -285,20 +290,28 @@ func conds(r *http.Request) store.Cond {
 }
 
 func (s *Server) put(w http.ResponseWriter, r *http.Request, res *resource) {
-	if res.kind != kCalObject {
-		http.Error(w, "PUT is only supported on calendar objects", http.StatusMethodNotAllowed)
+	if res.kind != kObject {
+		http.Error(w, "PUT is only supported on calendar objects and contacts", http.StatusMethodNotAllowed)
 		return
 	}
 	if res.col == nil {
-		http.Error(w, "calendar does not exist", http.StatusConflict)
+		http.Error(w, "collection does not exist", http.StatusConflict)
 		return
 	}
 	if !store.ValidName(res.name) {
 		badRequest(w, "invalid resource name")
 		return
 	}
-	if ct := r.Header.Get("Content-Type"); ct != "" && !strings.HasPrefix(strings.ToLower(ct), "text/calendar") {
-		dav.WriteError(w, http.StatusUnsupportedMediaType, dav.N(dav.NSCalDAV, "supported-calendar-data"), "expected text/calendar")
+	ns := dav.NSCalDAV
+	if !res.isCalendar() {
+		ns = dav.NSCardDAV
+	}
+	if !contentTypeOK(res.sk, r.Header.Get("Content-Type")) {
+		pre := "supported-calendar-data"
+		if !res.isCalendar() {
+			pre = "supported-address-data"
+		}
+		dav.WriteError(w, http.StatusUnsupportedMediaType, dav.N(ns, pre), "unexpected content type")
 		return
 	}
 	data, err := io.ReadAll(r.Body)
@@ -306,30 +319,18 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, res *resource) {
 		s.httpError(w, err)
 		return
 	}
-	cal, err := ical.ParseBytes(data)
-	if err != nil {
-		dav.WriteError(w, http.StatusForbidden, dav.N(dav.NSCalDAV, "valid-calendar-data"), err.Error())
-		return
-	}
-	if _, _, err := caldav.Validate(cal, res.col.Meta().Components); err != nil {
-		pre := "valid-calendar-object-resource"
-		switch {
-		case errors.Is(err, caldav.ErrInvalidData):
-			pre = "valid-calendar-data"
-		case errors.Is(err, caldav.ErrUnsupportedComponent):
-			pre = "supported-calendar-component"
-		}
-		dav.WriteError(w, http.StatusForbidden, dav.N(dav.NSCalDAV, pre), err.Error())
+	if pre, err := validate(res, data); err != nil {
+		dav.WriteError(w, http.StatusForbidden, dav.N(ns, pre), err.Error())
 		return
 	}
 	info, created, err := res.col.Put(res.name, data, conds(r))
 	var uidErr *store.UIDConflictError
 	if errors.As(err, &uidErr) {
-		href := calHomeHref(res.owner) + res.colName + "/" + uidErr.Existing
+		href := homeHref(res.sk, res.owner) + res.colName + "/" + uidErr.Existing
 		w.Header().Set("Content-Type", `application/xml; charset="utf-8"`)
 		w.WriteHeader(http.StatusConflict)
-		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?>`+"\n"+`<d:error xmlns:d="DAV:" xmlns:cal="%s"><cal:no-uid-conflict>%s</cal:no-uid-conflict></d:error>`+"\n",
-			dav.NSCalDAV, dav.Href(href))
+		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?>`+"\n"+`<d:error xmlns:d="DAV:" xmlns:x="%s"><x:no-uid-conflict>%s</x:no-uid-conflict></d:error>`+"\n",
+			ns, dav.Href(href))
 		return
 	}
 	if err != nil {
@@ -344,9 +345,47 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, res *resource) {
 	}
 }
 
+func contentTypeOK(sk store.Kind, ct string) bool {
+	if ct == "" {
+		return true
+	}
+	ct = strings.ToLower(ct)
+	if sk == store.Calendars {
+		return strings.HasPrefix(ct, "text/calendar")
+	}
+	return strings.HasPrefix(ct, "text/vcard") || strings.HasPrefix(ct, "text/x-vcard")
+}
+
+// validate checks a PUT body and returns the failed precondition's name.
+func validate(res *resource, data []byte) (string, error) {
+	if !res.isCalendar() {
+		if _, err := carddav.Validate(data); err != nil {
+			if errors.Is(err, carddav.ErrUnsupportedData) {
+				return "supported-address-data", err
+			}
+			return "valid-address-data", err
+		}
+		return "", nil
+	}
+	cal, err := ical.ParseBytes(data)
+	if err != nil {
+		return "valid-calendar-data", err
+	}
+	if _, _, err := caldav.Validate(cal, res.col.Meta().Components); err != nil {
+		switch {
+		case errors.Is(err, caldav.ErrInvalidData):
+			return "valid-calendar-data", err
+		case errors.Is(err, caldav.ErrUnsupportedComponent):
+			return "supported-calendar-component", err
+		}
+		return "valid-calendar-object-resource", err
+	}
+	return "", nil
+}
+
 func (s *Server) delete(w http.ResponseWriter, r *http.Request, res *resource) {
 	switch res.kind {
-	case kCalObject:
+	case kObject:
 		if !res.exists {
 			http.NotFound(w, r)
 			return
@@ -355,7 +394,7 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, res *resource) {
 			s.httpError(w, err)
 			return
 		}
-	case kCalendar:
+	case kCollection:
 		if res.col == nil {
 			http.NotFound(w, r)
 			return
@@ -380,10 +419,12 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, res *resource) {
 	}
 	user := userOf(r)
 	switch body.Name {
-	case dav.N(dav.NSCalDAV, "calendar-multiget"):
+	case dav.N(dav.NSCalDAV, "calendar-multiget"), dav.N(dav.NSCardDAV, "addressbook-multiget"):
 		s.multiget(w, user, res, body)
 	case dav.N(dav.NSCalDAV, "calendar-query"):
 		s.calendarQuery(w, r, user, res, body)
+	case dav.N(dav.NSCardDAV, "addressbook-query"):
+		s.addressbookQuery(w, r, user, res, body)
 	case dav.N(dav.NSDAV, "sync-collection"):
 		s.syncCollection(w, user, res, body)
 	case dav.N(dav.NSDAV, "principal-search-property-set"):
@@ -413,7 +454,7 @@ func (s *Server) multiget(w http.ResponseWriter, user string, res *resource, bod
 			p = u.Path
 		}
 		target, err := s.resolve(p, user)
-		if err != nil || target.kind != kCalObject || !target.exists {
+		if err != nil || target.kind != kObject || !target.exists || target.sk != res.sk {
 			st := http.StatusNotFound
 			if errors.Is(err, errForbidden) {
 				st = http.StatusForbidden
@@ -428,22 +469,39 @@ func (s *Server) multiget(w http.ResponseWriter, user string, res *resource, bod
 	ms.Write(w)
 }
 
-func (s *Server) calendarQuery(w http.ResponseWriter, r *http.Request, user string, res *resource, body *dav.Element) {
-	var objs []*resource
+// queryTargets returns the objects a query REPORT runs over: the members
+// of a collection (Depth: 1) or a single object.
+func (s *Server) queryTargets(w http.ResponseWriter, r *http.Request, res *resource, wantCal bool) ([]*resource, bool) {
+	if res.isCalendar() != wantCal {
+		dav.WriteError(w, http.StatusForbidden, dav.N(dav.NSDAV, "supported-report"), "report does not match collection type")
+		return nil, false
+	}
 	switch {
-	case res.kind == kCalendar && res.col != nil:
+	case res.kind == kCollection && res.col != nil:
 		depth, err := dav.Depth(r, 0)
 		if err != nil {
 			badRequest(w, err.Error())
-			return
+			return nil, false
 		}
-		if depth != 0 {
-			objs, _ = s.children(res)
+		if depth == 0 {
+			return nil, true
 		}
-	case res.kind == kCalObject && res.exists:
-		objs = []*resource{res}
-	default:
-		http.NotFound(w, r)
+		objs, err := s.children(res)
+		if err != nil {
+			s.httpError(w, err)
+			return nil, false
+		}
+		return objs, true
+	case res.kind == kObject && res.exists:
+		return []*resource{res}, true
+	}
+	http.NotFound(w, r)
+	return nil, false
+}
+
+func (s *Server) calendarQuery(w http.ResponseWriter, r *http.Request, user string, res *resource, body *dav.Element) {
+	objs, ok := s.queryTargets(w, r, res, true)
+	if !ok {
 		return
 	}
 	filter := body.Child(dav.NSCalDAV, "filter")
@@ -478,6 +536,57 @@ func (s *Server) calendarQuery(w http.ResponseWriter, r *http.Request, user stri
 		if ok {
 			ms.Responses = append(ms.Responses, s.responseFor(user, o, props, false))
 		}
+	}
+	ms.Write(w)
+}
+
+// addressbookQuery implements CARDDAV:addressbook-query (RFC 6352 §8.6).
+func (s *Server) addressbookQuery(w http.ResponseWriter, r *http.Request, user string, res *resource, body *dav.Element) {
+	objs, ok := s.queryTargets(w, r, res, false)
+	if !ok {
+		return
+	}
+	filter := body.Child(dav.NSCardDAV, "filter")
+	limit := 0
+	if l := body.Child(dav.NSCardDAV, "limit"); l != nil {
+		n, err := strconv.Atoi(strings.TrimSpace(l.Child(dav.NSCardDAV, "nresults").Text))
+		if err != nil || n < 1 {
+			badRequest(w, "bad limit")
+			return
+		}
+		limit = n
+	}
+	props := propElements(body)
+	ms := &dav.Multistatus{}
+	matched := 0
+	for _, o := range objs {
+		data, _, err := o.col.Get(o.name)
+		if err != nil {
+			continue // deleted concurrently
+		}
+		card, err := ical.ParseBytes(data)
+		if err != nil {
+			s.log.Warn("unparsable object", "href", o.href(), "err", err)
+			continue
+		}
+		ok, err := carddav.Match(card, filter)
+		if err != nil {
+			dav.WriteError(w, http.StatusForbidden, dav.N(dav.NSCardDAV, "valid-filter"), err.Error())
+			return
+		}
+		if !ok {
+			continue
+		}
+		if limit > 0 && matched == limit {
+			ms.Responses = append(ms.Responses, &dav.Response{
+				Href:   res.href(),
+				Status: http.StatusInsufficientStorage,
+				Error:  dav.E(dav.N(dav.NSDAV, "number-of-matches-within-limits"), ""),
+			})
+			break
+		}
+		matched++
+		ms.Responses = append(ms.Responses, s.responseFor(user, o, props, false))
 	}
 	ms.Write(w)
 }

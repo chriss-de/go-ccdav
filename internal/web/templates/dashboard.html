@@ -83,8 +83,16 @@
     <span class="col-name">{{$c.DisplayName}}</span>
     {{template "counts" $c}}
     {{range $c.Shares}}<span class="badge">{{.Target}} · {{.Access}}</span>{{end}}
+    {{if $c.ReadOnly}}<span class="badge">read-only</span>{{end}}
   </div>
   {{if $c.Description}}<div class="muted">{{$c.Description}}</div>{{end}}
+  {{if $c.ReadOnly}}
+  <div class="actions" data-actions>
+  <details name="act-{{$c.Key}}"><summary>Export</summary>
+    <div class="row"><a href="{{$p.Prefix}}export?key={{$c.Key}}">Download as {{if eq $c.Kind "calendars"}}.ics{{else}}.vcf{{end}}</a></div>
+  </details>
+  </div>
+  {{else}}
   <div class="actions" data-actions>
   <details name="act-{{$c.Key}}"><summary>Edit</summary>
     <form method="post" action="{{$p.Prefix}}collections/edit" class="row">
@@ -133,6 +141,7 @@
     </form>
   </details>
   </div>
+  {{end}}
 </div>
 {{end}}
 

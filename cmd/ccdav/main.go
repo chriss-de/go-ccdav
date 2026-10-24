@@ -26,8 +26,10 @@ import (
 
 	"github.com/chriss-de/go-ccdav/internal/auth"
 	"github.com/chriss-de/go-ccdav/internal/config"
+	"github.com/chriss-de/go-ccdav/internal/directory"
 	"github.com/chriss-de/go-ccdav/internal/server"
 	"github.com/chriss-de/go-ccdav/internal/store"
+	"github.com/chriss-de/go-ccdav/internal/trace"
 	"github.com/chriss-de/go-ccdav/internal/web"
 )
 
@@ -53,17 +55,21 @@ func main() {
 	}
 }
 
+// env reads CCDAV_<key>, falling back to the pre-rename DAVD_<key>.
 func env(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+	for _, k := range []string{"CCDAV_" + key, "DAVD_" + key} {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
 	}
 	return def
 }
 
 func run() error {
-	dataDir := flag.String("data", env("DAVD_DATA", "data"), "data directory (holds config.yaml)")
-	listen := flag.String("listen", env("DAVD_LISTEN", ":8080"), "listen address")
-	logFormat := flag.String("log", env("DAVD_LOG", "text"), "log format: text or json")
+	dataDir := flag.String("data", env("DATA", "data"), "data directory (holds config.yaml)")
+	listen := flag.String("listen", env("LISTEN", ":8080"), "listen address")
+	logFormat := flag.String("log", env("LOG", "text"), "log format: text or json")
+	traceDir := flag.String("trace", env("TRACE", ""), "record every DAV request and response into this directory (debugging; contains calendar data)")
 	flag.Parse()
 
 	var h slog.Handler = slog.NewTextHandler(os.Stderr, nil)
@@ -86,6 +92,9 @@ func run() error {
 	if err := st.LoadAll(); err != nil {
 		return err
 	}
+	if err := directory.Sync(cfg.Get(), st, server.DefaultAddressBooks); err != nil {
+		log.Error("directory address books", "err", err)
+	}
 	key, err := web.LoadOrCreateKey(filepath.Join(*dataDir, "session.key"))
 	if err != nil {
 		return err
@@ -99,11 +108,18 @@ func run() error {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	limiter := auth.NewLimiter() // shared: failed DAV and UI logins count together
 	mux.Handle(cfg.Get().UIPrefix, web.New(cfg, st, appPass, limiter, key, defaults, log))
-	mux.Handle("/", server.New(cfg, st, appPass, limiter, log)) // DAV prefix, well-known; 404 otherwise
+	var dav http.Handler = server.New(cfg, st, appPass, limiter, log)
+	if *traceDir != "" {
+		if dav, err = trace.Handler(*traceDir, dav, log); err != nil {
+			return err
+		}
+		log.Warn("tracing DAV requests; the files contain calendar and contact data", "dir", *traceDir)
+	}
+	mux.Handle("/", dav) // DAV prefix, well-known; 404 otherwise
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           mux,
+		Handler:           server.Recover(log, cfg, mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       2 * time.Minute,
 		WriteTimeout:      2 * time.Minute,
@@ -125,6 +141,9 @@ func run() error {
 			// Picks up shares changed with "ccdav share".
 			if err := st.ReloadMeta(); err != nil {
 				log.Error("reloading collection metadata", "err", err)
+			}
+			if err := directory.Sync(cfg.Get(), st, server.DefaultAddressBooks); err != nil {
+				log.Error("directory address books", "err", err)
 			}
 		}
 	}()
@@ -172,7 +191,7 @@ func hashPassword() int {
 
 func healthcheck(args []string) int {
 	fs := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
-	listen := fs.String("listen", env("DAVD_LISTEN", ":8080"), "listen address")
+	listen := fs.String("listen", env("LISTEN", ":8080"), "listen address")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

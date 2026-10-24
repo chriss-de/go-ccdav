@@ -117,6 +117,7 @@ func ParseXML(r io.Reader) (*Element, error) {
 		root   *Element
 		stack  []*Element
 		starts []int64
+		texts  []*strings.Builder // text of the open elements; += would be quadratic
 	)
 	for {
 		off := d.InputOffset()
@@ -144,13 +145,15 @@ func ParseXML(r io.Reader) (*Element, error) {
 			}
 			stack = append(stack, e)
 			starts = append(starts, d.InputOffset())
+			texts = append(texts, new(strings.Builder))
 		case xml.EndElement:
 			e := stack[len(stack)-1]
 			e.Inner = string(data[starts[len(starts)-1]:off])
-			stack, starts = stack[:len(stack)-1], starts[:len(starts)-1]
+			e.Text = texts[len(texts)-1].String()
+			stack, starts, texts = stack[:len(stack)-1], starts[:len(starts)-1], texts[:len(texts)-1]
 		case xml.CharData:
-			if len(stack) > 0 {
-				stack[len(stack)-1].Text += string(t)
+			if len(texts) > 0 {
+				texts[len(texts)-1].Write(t)
 			}
 		}
 	}

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -213,6 +214,8 @@ func (s *Server) httpError(w http.ResponseWriter, err error) {
 		http.Error(w, "not found", http.StatusNotFound)
 	case errors.Is(err, store.ErrPrecondition):
 		http.Error(w, "precondition failed", http.StatusPreconditionFailed)
+	case errors.Is(err, store.ErrReadOnly):
+		needPrivileges(w)
 	case errors.Is(err, store.ErrBadName):
 		http.Error(w, "invalid name", http.StatusBadRequest)
 	default:
@@ -224,4 +227,24 @@ func (s *Server) httpError(w http.ResponseWriter, err error) {
 		s.log.Error("internal error", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 	}
+}
+
+// Recover turns a panic in next into a logged 500 instead of a dropped
+// connection, so one bad request shows up with its method, path and stack.
+func Recover(log *slog.Logger, cfg *config.Store, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			v := recover()
+			if v == nil {
+				return
+			}
+			if v == http.ErrAbortHandler {
+				panic(v)
+			}
+			log.Error("panic", "method", r.Method, "path", r.URL.Path,
+				"ip", clientip.From(r, cfg.Get().Trusted), "err", v, "stack", string(debug.Stack()))
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}()
+		next.ServeHTTP(w, r)
+	})
 }

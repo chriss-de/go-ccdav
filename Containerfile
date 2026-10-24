@@ -9,7 +9,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}"
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/ccdav /usr/local/bin/ccdav
-ENV DAVD_DATA=/data DAVD_LISTEN=:8080 DAVD_LOG=json
+ENV CCDAV_DATA=/data CCDAV_LISTEN=:8080 CCDAV_LOG=json
 VOLUME /data
 EXPOSE 8080
 USER nonroot:nonroot

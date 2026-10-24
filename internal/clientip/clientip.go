@@ -38,6 +38,38 @@ func From(r *http.Request, trusted []netip.Prefix) string {
 	return peer.String()
 }
 
+// Origin returns the scheme and host the client used. X-Forwarded-Proto
+// and X-Forwarded-Host count only from a trusted proxy (the last value,
+// which that proxy set); otherwise the connection itself decides.
+func Origin(r *http.Request, trusted []netip.Prefix) (scheme, host string) {
+	scheme, host = "http", r.Host
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if peer := parse(r.RemoteAddr); !peer.IsValid() || !isTrusted(peer, trusted) {
+		return scheme, host
+	}
+	if v := last(r.Header.Values("X-Forwarded-Proto")); v == "https" || v == "http" {
+		scheme = v
+	}
+	if v := last(r.Header.Values("X-Forwarded-Host")); v != "" {
+		host = v
+	}
+	return scheme, host
+}
+
+// last returns the last comma-separated item of the header values.
+func last(vals []string) string {
+	if len(vals) == 0 {
+		return ""
+	}
+	v := vals[len(vals)-1]
+	if i := strings.LastIndexByte(v, ','); i >= 0 {
+		v = v[i+1:]
+	}
+	return strings.TrimSpace(v)
+}
+
 func isTrusted(a netip.Addr, trusted []netip.Prefix) bool {
 	for _, p := range trusted {
 		if p.Contains(a) {

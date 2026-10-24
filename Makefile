@@ -13,7 +13,7 @@ FUZZTIME ?= 30s
 GO       ?= go
 export CGO_ENABLED := 0
 
-.PHONY: all build test race vet fmt fmt-check check fuzz run clean \
+.PHONY: all build test race vet vulncheck fmt fmt-check check fuzz run clean \
         image image-run hash-password help
 
 all: check build
@@ -32,6 +32,9 @@ race: ## run tests with the race detector (needs cgo)
 
 vet: ## go vet
 	$(GO) vet ./...
+
+vulncheck: ## known vulnerabilities in dependencies and stdlib (govulncheck)
+	$(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 fmt: ## gofmt in place
 	gofmt -w -s .

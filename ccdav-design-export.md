@@ -22,7 +22,7 @@ Hand this file to a new session: "Read ccdav-design-export.md and continue from 
   - The server sends invitations itself and advertises `calendar-auto-schedule`.
   - RSVP uses the server's own HMAC-signed links (GET shows a confirmation page, POST records the answer), plus implicit scheduling for internal attendees. Receiving reply emails (IMAP, SMTP receiver, inbound webhook) is deferred.
   - Write our own RRULE expander with no dependencies, tested against ported test vectors. `teambition/rrule-go` is the fallback if this gets out of hand.
-- **Status (2026-10-23):** milestones 1–7 implemented (see README.md). Build via Makefile, deploy as a container behind a TLS-terminating reverse proxy. Calendars and contacts tested with DAVx⁵. Next: milestone 8 (scheduling / iMIP).
+- **Status (2026-10-24):** milestones 1–7, 10 and 11 implemented (see README.md). Renamed from davd to ccdav (module `github.com/chriss-de/go-ccdav`); old `DAVD_*` env vars and `http://davd/ns/sync/` tokens are still accepted. Build via Makefile, deploy as a container behind a TLS-terminating reverse proxy. Calendars and contacts tested with DAVx⁵. Next: milestone 8 (scheduling / iMIP).
 
 ---
 
@@ -115,7 +115,9 @@ data/
 
 ## 5b. Web UI, as implemented (2026-10-24)
 
-- Under `ui_prefix`; server-rendered `html/template`, no JavaScript. Strict CSP, `no-store`.
+- Under `ui_prefix`; server-rendered `html/template`. Strict CSP (`script-src 'self'`), `no-store`. Two small optional scripts from `static/`: the colour wheel and the action buttons (one panel per collection open at a time). Without JavaScript everything works with plain `<details>`.
+- Each collection is a card with per-type chips (`VEVENT 412`, `VTODO 3`; "N contacts" for address books), counted from `ObjectInfo.Comp`, which the store fills in when it indexes an object.
+- Calendar component types can be changed in the Edit panel; removing a type is refused while the calendar still holds objects of it. Over DAV the set stays protected (RFC 4791).
 - Login: OIDC authorization code + PKCE via `golang.org/x/oauth2`, identity from the userinfo endpoint (no ID-token verification needed: back-channel exchange over TLS with client secret). `username_claim` (default `preferred_username`) must match a `config.yaml` user name or email (allowlist). Without `oidc:`, password login with the `config.yaml` password.
 - Sessions and the OIDC state/PKCE verifier are HMAC-signed cookies (`data/session.key`), 12 h; CSRF token bound to the session on every POST; SameSite=Lax, Secure behind HTTPS.
 - App passwords: 120-bit random, SHA-256 hashed, in `data/users/<u>/app-passwords.json`, named and revocable, shown once. DAV Basic auth checks them first, then the `config.yaml` password (kept as fallback).
@@ -129,6 +131,20 @@ data/
 - UI delete for own collections with confirmation checkbox.
 - App passwords record last use (persisted at most hourly).
 - `free-busy-query` REPORT. Attendee availability in clients needs the scheduling outbox (milestone 8).
+
+## 5d. Hardening (milestone 10, 2026-10-24)
+
+- Fuzz targets with invariants: `dav.ParseXML` (depth limit, Inner is a substring), calendar-query `Match`, calendar-data `RenderData`, `caldav.Split` (each object carries the UID it's filed under), carddav `Match`/`RenderData`/`Split`, sync tokens (round trip), directory vCards (name and email round-trip).
+- Found by review: XML text split by comments was concatenated quadratically (0.7 s for a 1 MB body); now a `strings.Builder` per element.
+- Client scenario tests (`internal/server/clients_test.go`) for Apple, Thunderbird, DAVx⁵ and Evolution, written from their known request shapes. Plan: replace or extend them with recordings from `-trace DIR`.
+- `X-Forwarded-Proto`/`X-Forwarded-Host` only from `trusted_proxies` (`clientip.Origin`); panics → logged 500 (`server.Recover`); `make vulncheck`.
+
+## 5e. Directory address book (milestone 11, 2026-10-24)
+
+- A real stored collection `ccdav-directory` in every user's address book home, marked `ReadOnly` in `.meta.json`. Rebuilt from `config.yaml` at startup and on SIGHUP; only changed cards are written, so the change log gives clients incremental sync.
+- vCard 3.0: one per user (FN, guessed N, EMAIL), UIDs are stable name-based UUIDs. One Apple-style group card (`X-ADDRESSBOOKSERVER-KIND:group`, members as `urn:uuid:`) per group the owner belongs to.
+- Read-only means: owner access is reduced to read; PUT/DELETE/PROPPATCH/collection DELETE → 403; privileges are read only; the UI shows Export only; `SetShares` refuses (`ErrReadOnly`), which also covers the CLI.
+- `directory: false` deletes the generated collections on the next sync. An existing user-made collection with the same name is left alone (logged).
 
 ## 6. Invitations (iMIP) and RSVP
 

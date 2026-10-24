@@ -74,6 +74,9 @@ func (c *Collection) SetShares(shares []Share) error {
 	if err := c.refreshMeta(); err != nil {
 		return err
 	}
+	if c.meta.ReadOnly && len(shares) > 0 {
+		return ErrReadOnly
+	}
 	m := c.metaCopy()
 	m.Shares = slices.Clone(shares)
 	b, _ := json.MarshalIndent(m, "", "  ")

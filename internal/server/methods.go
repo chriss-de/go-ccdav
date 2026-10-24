@@ -104,8 +104,8 @@ func (s *Server) proppatch(w http.ResponseWriter, r *http.Request, res *resource
 	}
 	els, removes := parseSetRemove(body)
 	resp := &dav.Response{Href: res.href()}
-	if res.kind != kCollection || res.col == nil {
-		if res.kind == kCollection || res.kind == kObject && !res.exists {
+	if res.kind != kCollection || res.col == nil || res.col.ReadOnly() {
+		if res.kind == kCollection && res.col == nil || res.kind == kObject && !res.exists {
 			http.NotFound(w, r)
 			return
 		}
@@ -458,6 +458,10 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, res *resource) {
 				return
 			}
 			break
+		}
+		if res.col.ReadOnly() {
+			needPrivileges(w)
+			return
 		}
 		if err := s.store.DeleteCollection(res.col); err != nil {
 			s.httpError(w, err)

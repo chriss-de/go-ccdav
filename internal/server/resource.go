@@ -131,6 +131,15 @@ func (s *Server) access(user string, c *store.Collection) access {
 	return accNone
 }
 
+// ownAccess is the owner's right on their own collection c (nil: not
+// created yet); generated collections are read-only even for the owner.
+func ownAccess(c *store.Collection) access {
+	if c != nil && c.ReadOnly() {
+		return accRead
+	}
+	return accOwner
+}
+
 // resolve maps a request path to a resource and enforces access: users can
 // see all principals but only their own homes; collections shared with
 // them appear in their home under an alias.
@@ -211,7 +220,7 @@ func (s *Server) resolve(path, user string) (*resource, error) {
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			return nil, err
 		}
-		res.col, res.acc = col, accOwner
+		res.col, res.acc = col, ownAccess(col)
 	}
 	if len(segs) == 3 {
 		return res, nil
@@ -269,7 +278,7 @@ func (s *Server) children(res *resource) ([]*resource, error) {
 		var out []*resource
 		for _, c := range cols {
 			out = append(out, &resource{base: base, kind: kCollection, sk: res.sk, owner: res.owner,
-				colName: c.Name, col: c, acc: accOwner})
+				colName: c.Name, col: c, acc: ownAccess(c)})
 		}
 		for _, c := range s.store.All() {
 			if c.Kind != res.sk || c.Owner == res.owner {

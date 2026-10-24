@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseXML(t *testing.T) {
@@ -52,5 +53,18 @@ func TestMultistatus(t *testing.T) {
 	// Must be well-formed.
 	if err := xml.Unmarshal([]byte(out), new(struct{})); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestParseXMLManyTextChunks(t *testing.T) {
+	// Text split by many comments must not take quadratic time.
+	n := (maxXMLBody - 10) / 8
+	start := time.Now()
+	e, err := ParseXML(strings.NewReader("<a>" + strings.Repeat("x<!---->", n) + "</a>"))
+	if err != nil || len(e.Text) != n {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 200*time.Millisecond {
+		t.Fatalf("took %v", d)
 	}
 }

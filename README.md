@@ -4,7 +4,7 @@ A small self-hosted CalDAV and CardDAV server written in Go. It stores everythin
 
 ## Status
 
-Milestones 1–7 are implemented:
+Milestones 1–7, 10 and 11 are implemented:
 
 - **Discovery:** `/.well-known/caldav` and `/.well-known/carddav`, principals, calendar and address book homes, and PROPFIND.
 - **Writes:**
@@ -26,9 +26,17 @@ Milestones 1–7 are implemented:
   - For collections shared with you: your own name and colour, and hiding them from your devices.
 - **Free/busy:** the `free-busy-query` report on calendars, with recurrences expanded. Transparent and cancelled events are left out.
 - **Login protection:** failed logins (DAV and UI) are rate-limited per client IP and user. Behind a reverse proxy, set `trusted_proxies` so the real client IP is used for this and in the log.
+- **Directory address book:** every user has a read-only address book `Directory` (`ccdav-directory`) with one vCard 3.0 per configured user (name, email) and an Apple-style group vCard for each group they belong to. It's rebuilt from `config.yaml` at startup and on `SIGHUP`, writing only the cards that changed, so devices sync just the difference. `directory: false` removes it.
 - **Sync (RFC 6578):** the `sync-collection` report with `limit`, plus `DAV:sync-token` and `getctag`. Changes to calendar properties also move the token, so clients pick up renames and colour changes quickly.
 
-The following are not implemented yet: scheduling and iMIP (7), and RSVP (8).
+- **Hardening:**
+  - Fuzz targets for every parser of client input (XML bodies, calendar and address book filters, partial retrieval, import splitting, sync tokens, directory vCards).
+  - Scenario tests that replay how Apple, Thunderbird, DAVx⁵ and Evolution set up and sync.
+  - `X-Forwarded-Proto` / `X-Forwarded-Host` are only honored from `trusted_proxies`.
+  - A panic in a request is logged with its stack and answered with 500.
+  - `-trace DIR` records DAV traffic for debugging client problems (see below).
+
+The following are not implemented yet: scheduling and iMIP (8), and RSVP links (9).
 
 ## Run
 
@@ -36,6 +44,7 @@ The following are not implemented yet: scheduling and iMIP (7), and RSVP (8).
 make run          # builds, seeds data/config.yaml from config.example.yaml (alice / alice), listens on :8080
 make check        # gofmt check + vet + tests
 make fuzz         # every fuzz target, FUZZTIME=30s each
+make vulncheck    # govulncheck: known vulnerabilities in what the code calls
 ```
 
 Point a client at `http://localhost:8080/`. Discovery goes through `/.well-known/caldav` or `/.well-known/carddav`, both of which redirect to the DAV prefix (`/dav/` by default). Apart from those, `/healthz` and the configured prefixes, every path returns 404, including `/`. Each user starts with one calendar, `Personal` (events, tasks and journal), and the address book `contacts`.
@@ -74,9 +83,16 @@ To create a password hash, run `make hash-password` or `ccdav hash-password`. Bo
 
 | Flag | Env | Default |
 |---|---|---|
-| `-data` | `DAVD_DATA` | `data` |
-| `-listen` | `DAVD_LISTEN` | `:8080` |
-| `-log` (`text`/`json`) | `DAVD_LOG` | `text` |
+| `-data` | `CCDAV_DATA` | `data` |
+| `-listen` | `CCDAV_LISTEN` | `:8080` |
+| `-log` (`text`/`json`) | `CCDAV_LOG` | `text` |
+| `-trace DIR` | `CCDAV_TRACE` | off |
+
+The old `DAVD_*` names still work.
+
+### Tracing a client
+
+`-trace DIR` writes one file per DAV request: the request line, headers and body, then the response status, headers and body (each capped at 1 MB). `Authorization`, `Cookie` and `Set-Cookie` are blanked out, but calendar and contact data is not, so treat the directory as private and delete it afterwards. It's meant for short sessions: start with it, let a client set up or sync, stop, and turn interesting exchanges into tests.
 
 ## Container
 
@@ -85,7 +101,40 @@ make image                      # ENGINE=podman by default; ENGINE=docker works 
 make image-run                  # mounts ./data at /data, port 8080
 ```
 
-The image uses distroless `static:nonroot`, keeps its data in the `/data` volume and has a `HEALTHCHECK` that runs `ccdav healthcheck`. The server speaks plain HTTP. TLS is meant to be terminated by a reverse proxy such as Caddy or nginx, and it should pass the `Authorization` header through.
+The image uses distroless `static:nonroot`, keeps its data in the `/data` volume and has a `HEALTHCHECK` that runs `ccdav healthcheck`.
+
+### Behind a reverse proxy
+
+The server speaks plain HTTP; a reverse proxy terminates TLS. Put the proxy's address in `trusted_proxies` so the client IP (rate limiting, log), the scheme (secure cookies) and the host (the server URL shown in the UI) come from its `X-Forwarded-*` headers. Headers from anyone else are ignored. Setting `base_url` makes the shown URL independent of headers altogether.
+
+Caddy passes everything needed by default:
+
+```
+dav.example.com {
+	reverse_proxy ccdav:8080
+}
+```
+
+nginx needs the headers, a body limit at least as large as the import limit (50 MB), and no buffering of large responses:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name dav.example.com;
+    client_max_body_size 60m;
+
+    location / {
+        proxy_pass http://ccdav:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+        proxy_buffering off;
+    }
+}
+```
+
+Both forward `/.well-known/caldav` and `/.well-known/carddav` with everything else; ccdav answers them with a redirect to the DAV prefix. Don't strip the `Authorization` header.
 
 ## Layout
 
@@ -97,6 +146,9 @@ internal/store      file layout, atomic writes, ETags, change log, per-collectio
 internal/ical       content-line parser/encoder (iCalendar + vCard)
 internal/rrule      RRULE expansion, timezone resolution, recurrence sets
 internal/dav        XML parsing, multistatus writer
+internal/directory  generated read-only directory address book
+internal/clientip   client IP and origin behind trusted proxies
+internal/trace      -trace request/response recorder
 internal/web        web UI: login (OIDC/password), app passwords, collections, sharing
 internal/caldav     validation, calendar-query filters, calendar-data / expand
 internal/carddav    vCard validation, addressbook-query filters, address-data

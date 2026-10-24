@@ -67,6 +67,9 @@ type Config struct {
 	Trusted        []netip.Prefix `yaml:"-"`
 	SMTP           SMTP           `yaml:"smtp,omitempty"`
 	RSVPSecret     string         `yaml:"rsvp_secret,omitempty"`
+	// Directory adds a generated, read-only address book with all users
+	// to every user's home (default on).
+	Directory *bool `yaml:"directory,omitempty"`
 }
 
 var userRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
@@ -219,5 +222,8 @@ func (c *Config) GroupsOf(user string) []string {
 	slices.Sort(out)
 	return out
 }
+
+// DirectoryEnabled reports whether the directory address book is on.
+func (c *Config) DirectoryEnabled() bool { return c.Directory == nil || *c.Directory }
 
 func (s *Store) Get() *Config { return s.cur.Load() }

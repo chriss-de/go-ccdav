@@ -23,7 +23,7 @@ them up on SIGHUP (kill -HUP <pid>, podman kill -s HUP <container>).
 
 func shareCmd(cmd string, args []string) int {
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	dataDir := fs.String("data", env("DAVD_DATA", "data"), "data directory")
+	dataDir := fs.String("data", env("DATA", "data"), "data directory")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, shareUsage) }
 	if err := fs.Parse(args); err != nil {
 		return 2

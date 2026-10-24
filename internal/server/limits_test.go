@@ -1,7 +1,11 @@
 package server
 
 import (
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -77,4 +81,22 @@ func TestFreeBusyQuery(t *testing.T) {
 	notContains(t, out, "20260119", "20260126")
 	alice.expect("REPORT", cal, `<c:free-busy-query xmlns:c="urn:ietf:params:xml:ns:caldav"/>`, http.StatusBadRequest)
 	alice.expect("REPORT", "/dav/addressbooks/alice/contacts/", `<c:free-busy-query xmlns:c="urn:ietf:params:xml:ns:caldav"><c:time-range start="20260112T000000Z" end="20260128T000000Z"/></c:free-busy-query>`, http.StatusForbidden)
+}
+
+func TestRecover(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	os.WriteFile(path, []byte("users: {}\n"), 0o600)
+	cs, err := config.NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged strings.Builder
+	log := slog.New(slog.NewTextHandler(&logged, nil))
+	h := Recover(log, cs, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("boom") }))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("PROPFIND", "/dav/x/", nil))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatal(w.Code)
+	}
+	contains(t, logged.String(), "panic", "PROPFIND", "/dav/x/", "boom", "stack=")
 }

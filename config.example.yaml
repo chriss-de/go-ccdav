@@ -42,6 +42,11 @@ users:
 groups:
   family: [alice]
 
+# Every user gets a generated, read-only address book "Directory" with one
+# contact per user (name, email) and one group contact per group they're in,
+# for autocomplete. Rebuilt at startup and on SIGHUP. false removes it.
+# directory: true
+
 # Used once invitations are implemented (milestone 7).
 # smtp:
 #   host: smtp.example.com

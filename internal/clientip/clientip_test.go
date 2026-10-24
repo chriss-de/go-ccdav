@@ -36,3 +36,29 @@ func TestFrom(t *testing.T) {
 		t.Error("bad prefix accepted")
 	}
 }
+
+func TestOrigin(t *testing.T) {
+	trusted, _ := ParsePrefixes([]string{"10.88.0.0/16"})
+	for _, c := range []struct {
+		remote, proto, host, wantScheme, wantHost string
+	}{
+		{"203.0.113.9:1", "https", "evil.example", "http", "dav.local"}, // untrusted: ignored
+		{"10.88.0.5:1", "https", "", "https", "dav.local"},
+		{"10.88.0.5:1", "https", "dav.example.com", "https", "dav.example.com"},
+		{"10.88.0.5:1", "http, https", "a, dav.example.com", "https", "dav.example.com"}, // last value is our proxy's
+		{"10.88.0.5:1", "gopher", "", "http", "dav.local"},
+		{"10.88.0.5:1", "", "", "http", "dav.local"},
+	} {
+		r, _ := http.NewRequest("GET", "http://dav.local/", nil)
+		r.RemoteAddr = c.remote
+		if c.proto != "" {
+			r.Header.Set("X-Forwarded-Proto", c.proto)
+		}
+		if c.host != "" {
+			r.Header.Set("X-Forwarded-Host", c.host)
+		}
+		if s, h := Origin(r, trusted); s != c.wantScheme || h != c.wantHost {
+			t.Errorf("%+v: got %s %s", c, s, h)
+		}
+	}
+}

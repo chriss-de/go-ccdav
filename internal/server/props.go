@@ -184,6 +184,10 @@ func privilegesFor(user string, res *resource) []string {
 		}
 	case kHomes, kHome:
 		acc = accOwner
+	case kCollection, kObject:
+		if res.col != nil && res.col.ReadOnly() {
+			return []string{"read", "read-current-user-privilege-set"}
+		}
 	}
 	switch acc {
 	case accOwner:

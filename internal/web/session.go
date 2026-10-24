@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/chriss-de/go-ccdav/internal/clientip"
 )
 
 // Sessions and the OIDC login state live in signed cookies; nothing is
@@ -93,8 +95,9 @@ func (u *UI) verifyTimed(purpose, value string) ([]string, bool) {
 }
 
 func (u *UI) secure(r *http.Request) bool {
-	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") ||
-		strings.HasPrefix(u.cfg.Get().BaseURL, "https://")
+	c := u.cfg.Get()
+	scheme, _ := clientip.Origin(r, c.Trusted)
+	return scheme == "https" || strings.HasPrefix(c.BaseURL, "https://")
 }
 
 func (u *UI) setCookie(w http.ResponseWriter, r *http.Request, name, value string, ttl time.Duration) {

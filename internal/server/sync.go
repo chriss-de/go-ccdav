@@ -6,13 +6,17 @@ import (
 	"strconv"
 	"strings"
 
-	"davd/internal/dav"
-	"davd/internal/store"
+	"github.com/chriss-de/go-ccdav/internal/dav"
+	"github.com/chriss-de/go-ccdav/internal/store"
 )
 
 // Sync tokens are URIs (RFC 6578 §3.2) carrying the collection's sync ID
 // and its change counter.
-const syncTokenPrefix = "http://davd/ns/sync/"
+const syncTokenPrefix = "http://ccdav/ns/sync/"
+
+// oldSyncTokenPrefix is from before the rename; clients holding such a
+// token keep syncing incrementally instead of starting over.
+const oldSyncTokenPrefix = "http://davd/ns/sync/"
 
 func formatSyncToken(id string, n uint64) string {
 	return syncTokenPrefix + id + "-" + strconv.FormatUint(n, 10)
@@ -26,12 +30,18 @@ func parseSyncToken(tok, id string) (uint64, error) {
 	}
 	rest, ok := strings.CutPrefix(tok, syncTokenPrefix)
 	if !ok {
+		rest, ok = strings.CutPrefix(tok, oldSyncTokenPrefix)
+	}
+	if !ok {
 		return 0, store.ErrInvalidToken
 	}
 	i := strings.LastIndexByte(rest, '-')
 	if i < 0 || rest[:i] != id {
 		return 0, store.ErrInvalidToken
 	}
+	// Shared collections append ".<pref version>" for the sharee; it only
+	// makes the token change and carries no position.
+	rest, _, _ = strings.Cut(rest, ".")
 	// "-0" (from syncing an empty collection) means "everything", which
 	// is the same as an initial sync.
 	n, err := strconv.ParseUint(rest[i+1:], 10, 64)
@@ -101,6 +111,6 @@ func (s *Server) syncCollection(w http.ResponseWriter, user string, res *resourc
 			ms.Responses = append(ms.Responses, &dav.Response{Href: o.href(), Status: http.StatusNotFound})
 		}
 	}
-	ms.SyncToken = formatSyncToken(id, cur)
+	ms.SyncToken = s.syncToken(res, cur)
 	ms.Write(w)
 }

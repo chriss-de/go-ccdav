@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"davd/internal/dav"
-	"davd/internal/ical"
+	"github.com/chriss-de/go-ccdav/internal/dav"
+	"github.com/chriss-de/go-ccdav/internal/ical"
 )
 
 const appleCard = "BEGIN:VCARD\r\nVERSION:3.0\r\nPRODID:-//Apple Inc.//iPhone OS 18.0//EN\r\nN:Doe;Jane;;;\r\nFN:Jane Doe\r\n" +
@@ -110,5 +110,17 @@ func TestRenderData(t *testing.T) {
 	all, _ := dav.ParseXML(strings.NewReader(`<C:address-data xmlns:C="urn:ietf:params:xml:ns:carddav"/>`))
 	if out, _ := RenderData([]byte(appleCard), all); out != appleCard {
 		t.Error("full address-data must be byte-exact")
+	}
+}
+
+func TestSplit(t *testing.T) {
+	v21 := strings.Replace(strings.Replace(appleCard, "VERSION:3.0", "VERSION:2.1", 1), "jane-1", "old", 1)
+	two := strings.Replace(appleCard, "jane-1", "jane-2", 1)
+	cards, skipped, err := Split([]byte(appleCard + v21 + two))
+	if err != nil || len(cards) != 2 || skipped != 1 || cards[1].UID != "jane-2" {
+		t.Fatalf("%v %d %+v", err, skipped, cards)
+	}
+	if _, err := Validate(cards[0].Data); err != nil {
+		t.Fatal(err)
 	}
 }

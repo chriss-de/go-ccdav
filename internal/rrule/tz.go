@@ -15,7 +15,7 @@ import (
 	"time"
 	_ "time/tzdata" // embedded IANA database: do not depend on the host
 
-	"davd/internal/ical"
+	"github.com/chriss-de/go-ccdav/internal/ical"
 )
 
 var (

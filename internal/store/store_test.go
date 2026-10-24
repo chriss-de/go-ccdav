@@ -6,13 +6,13 @@ import (
 	"testing"
 )
 
-func uidOf(_ Kind, b []byte) string {
+func uidOf(_ Kind, b []byte) (uid, comp string) {
 	for l := range strings.SplitSeq(string(b), "\n") {
 		if v, ok := strings.CutPrefix(l, "UID:"); ok {
-			return strings.TrimSpace(v)
+			return strings.TrimSpace(v), ""
 		}
 	}
-	return ""
+	return "", ""
 }
 
 func TestCollectionLifecycle(t *testing.T) {

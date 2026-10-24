@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"davd/internal/ical"
+	"github.com/chriss-de/go-ccdav/internal/ical"
 )
 
 // Occurrence is one instance of a (possibly recurring) component.

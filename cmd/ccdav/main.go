@@ -1,8 +1,9 @@
-// Command davd is a small self-hosted CalDAV server backed by plain files.
+// Command ccdav is a small self-hosted CalDAV server backed by plain files.
 //
-//	davd [-data DIR] [-listen ADDR]   run the server
-//	davd hash-password                read a password from stdin, print its hash
-//	davd healthcheck [-listen ADDR]   exit 0 if the local server answers /healthz
+//	ccdav [-data DIR] [-listen ADDR]   run the server
+//	ccdav hash-password                read a password from stdin, print its hash
+//	ccdav healthcheck [-listen ADDR]   exit 0 if the local server answers /healthz
+//	ccdav share | unshare | shares     manage sharing (see "ccdav share -h")
 //
 // The config is read from config.yaml (or config.yml / config.json) in the
 // data directory. TLS is expected to be terminated by a reverse proxy.
@@ -18,14 +19,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
-	"davd/internal/auth"
-	"davd/internal/config"
-	"davd/internal/server"
-	"davd/internal/store"
+	"github.com/chriss-de/go-ccdav/internal/auth"
+	"github.com/chriss-de/go-ccdav/internal/config"
+	"github.com/chriss-de/go-ccdav/internal/server"
+	"github.com/chriss-de/go-ccdav/internal/store"
+	"github.com/chriss-de/go-ccdav/internal/web"
 )
 
 var version = "dev"
@@ -37,13 +40,15 @@ func main() {
 			os.Exit(hashPassword())
 		case "healthcheck":
 			os.Exit(healthcheck(os.Args[2:]))
+		case "share", "unshare", "shares":
+			os.Exit(shareCmd(os.Args[1], os.Args[2:]))
 		case "version", "-version", "--version":
 			fmt.Println(version)
 			return
 		}
 	}
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "davd:", err)
+		fmt.Fprintln(os.Stderr, "ccdav:", err)
 		os.Exit(1)
 	}
 }
@@ -76,9 +81,25 @@ func run() error {
 		return err
 	}
 	st := store.New(*dataDir, server.UIDOf)
+	// Load everything up front: listing a user's home must know about
+	// collections other users shared with them.
+	if err := st.LoadAll(); err != nil {
+		return err
+	}
+	key, err := web.LoadOrCreateKey(filepath.Join(*dataDir, "session.key"))
+	if err != nil {
+		return err
+	}
+	appPass := auth.NewAppPasswords(*dataDir)
+	defaults := map[store.Kind]map[string]store.Meta{
+		store.Calendars:    server.DefaultCalendars,
+		store.AddressBooks: server.DefaultAddressBooks,
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
-	mux.Handle("/", server.New(cfg, st, log))
+	limiter := auth.NewLimiter() // shared: failed DAV and UI logins count together
+	mux.Handle(cfg.Get().UIPrefix, web.New(cfg, st, appPass, limiter, key, defaults, log))
+	mux.Handle("/", server.New(cfg, st, appPass, limiter, log)) // DAV prefix, well-known; 404 otherwise
 
 	srv := &http.Server{
 		Addr:              *listen,
@@ -101,12 +122,17 @@ func run() error {
 			} else {
 				log.Info("config reloaded")
 			}
+			// Picks up shares changed with "ccdav share".
+			if err := st.ReloadMeta(); err != nil {
+				log.Error("reloading collection metadata", "err", err)
+			}
 		}
 	}()
 
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", *listen, "data", *dataDir, "config", cfgPath, "version", version)
+		log.Info("listening", "addr", *listen, "data", *dataDir, "config", cfgPath,
+			"dav_prefix", cfg.Get().DAVPrefix, "ui_prefix", cfg.Get().UIPrefix, "version", version)
 		errc <- srv.ListenAndServe()
 	}()
 	select {
@@ -127,17 +153,17 @@ func hashPassword() int {
 	fmt.Fprint(os.Stderr, "password: ")
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && line == "" {
-		fmt.Fprintln(os.Stderr, "davd:", err)
+		fmt.Fprintln(os.Stderr, "ccdav:", err)
 		return 1
 	}
 	pw := strings.TrimRight(line, "\r\n")
 	if pw == "" {
-		fmt.Fprintln(os.Stderr, "davd: empty password")
+		fmt.Fprintln(os.Stderr, "ccdav: empty password")
 		return 1
 	}
 	h, err := auth.Hash(pw)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "davd:", err)
+		fmt.Fprintln(os.Stderr, "ccdav:", err)
 		return 1
 	}
 	fmt.Println(h)

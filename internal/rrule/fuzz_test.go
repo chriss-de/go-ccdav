@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"davd/internal/ical"
+	"github.com/chriss-de/go-ccdav/internal/ical"
 )
 
 var fuzzRuleSeeds = []string{

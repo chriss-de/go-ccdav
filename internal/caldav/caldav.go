@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"davd/internal/dav"
-	"davd/internal/ical"
-	"davd/internal/rrule"
+	"github.com/chriss-de/go-ccdav/internal/dav"
+	"github.com/chriss-de/go-ccdav/internal/ical"
+	"github.com/chriss-de/go-ccdav/internal/rrule"
 )
 
 // Validation errors map to CalDAV preconditions.
@@ -75,23 +75,28 @@ func Validate(cal *ical.Component, allowed []string) (uid, comp string, err erro
 	return uid, comp, nil
 }
 
-// UIDOf returns the UID of a calendar object or vCard, "" if unparsable.
-func UIDOf(data []byte) string {
+// UIDOf returns the UID and component type (VEVENT, VTODO, ...) of a
+// calendar object, or the UID of a vCard; "" if unparsable.
+func UIDOf(data []byte) (uid, comp string) {
 	c, err := ical.ParseBytes(data)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	if c.Name == "VCARD" {
-		return c.Value("UID")
+		return c.Value("UID"), ""
 	}
 	for _, ch := range c.Children {
-		if ch.Name != "VTIMEZONE" {
-			if u := ch.Value("UID"); u != "" {
-				return u
-			}
+		if ch.Name == "VTIMEZONE" {
+			continue
+		}
+		if comp == "" {
+			comp = ch.Name
+		}
+		if u := ch.Value("UID"); u != "" {
+			return u, comp
 		}
 	}
-	return ""
+	return "", comp
 }
 
 // ParseTimeRange reads start/end attributes of a CALDAV:time-range or

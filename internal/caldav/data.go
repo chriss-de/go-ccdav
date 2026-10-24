@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"davd/internal/dav"
-	"davd/internal/ical"
-	"davd/internal/rrule"
+	"github.com/chriss-de/go-ccdav/internal/dav"
+	"github.com/chriss-de/go-ccdav/internal/ical"
+	"github.com/chriss-de/go-ccdav/internal/rrule"
 )
 
 const (

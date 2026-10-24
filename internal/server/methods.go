@@ -9,12 +9,13 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
-	"davd/internal/caldav"
-	"davd/internal/carddav"
-	"davd/internal/dav"
-	"davd/internal/ical"
-	"davd/internal/store"
+	"github.com/chriss-de/go-ccdav/internal/caldav"
+	"github.com/chriss-de/go-ccdav/internal/carddav"
+	"github.com/chriss-de/go-ccdav/internal/dav"
+	"github.com/chriss-de/go-ccdav/internal/ical"
+	"github.com/chriss-de/go-ccdav/internal/store"
 )
 
 func badRequest(w http.ResponseWriter, msg string) { http.Error(w, msg, http.StatusBadRequest) }
@@ -118,17 +119,31 @@ func (s *Server) proppatch(w http.ResponseWriter, r *http.Request, res *resource
 	// every property succeeded.
 	statuses := make([]int, len(els))
 	failed := false
-	err = res.col.UpdateMeta(func(m *store.Meta) {
-		trial := *m
-		trial.DeadProps = maps.Clone(m.DeadProps)
-		for i, el := range els {
-			statuses[i] = applyProp(&trial, res.sk, el.Name, el, removes[i])
-			failed = failed || statuses[i] != http.StatusOK
-		}
-		if !failed {
-			*m = trial
-		}
-	})
+	if res.isShared() {
+		// A sharee only changes their own view (name, color, order).
+		err = s.store.UpdateSharePrefs(res.owner, res.col.Key(), func(p *store.SharePrefs) {
+			trial := *p
+			for i, el := range els {
+				statuses[i] = applySharedProp(&trial, el, removes[i])
+				failed = failed || statuses[i] != http.StatusOK
+			}
+			if !failed {
+				*p = trial
+			}
+		})
+	} else {
+		err = res.col.UpdateMeta(func(m *store.Meta) {
+			trial := *m
+			trial.DeadProps = maps.Clone(m.DeadProps)
+			for i, el := range els {
+				statuses[i] = applyProp(&trial, res.sk, el.Name, el, removes[i])
+				failed = failed || statuses[i] != http.StatusOK
+			}
+			if !failed {
+				*m = trial
+			}
+		})
+	}
 	if err != nil {
 		s.httpError(w, err)
 		return
@@ -153,6 +168,10 @@ func (s *Server) mkcollection(w http.ResponseWriter, r *http.Request, res *resou
 	if res.col != nil {
 		w.Header().Set("Allow", "OPTIONS, GET, HEAD, DELETE, PROPFIND, PROPPATCH, REPORT")
 		http.Error(w, "already exists", http.StatusMethodNotAllowed)
+		return
+	}
+	if !store.ValidCollectionName(res.colName) {
+		http.Error(w, `invalid collection name ("~" is reserved)`, http.StatusForbidden)
 		return
 	}
 	body, err := dav.ParseXML(r.Body)
@@ -237,6 +256,31 @@ func (s *Server) mkcollection(w http.ResponseWriter, r *http.Request, res *resou
 	w.WriteHeader(http.StatusCreated)
 }
 
+// needPrivileges answers a write on a read-only share.
+func needPrivileges(w http.ResponseWriter) {
+	dav.WriteError(w, http.StatusForbidden, dav.N(dav.NSDAV, "need-privileges"), "read-only share")
+}
+
+// applySharedProp applies a PROPPATCH from a sharee to their own view of
+// the collection: only name, color and order can be changed.
+func applySharedProp(p *store.SharePrefs, el *dav.Element, remove bool) int {
+	text := ""
+	if !remove {
+		text = strings.TrimSpace(el.Text)
+	}
+	switch el.Name {
+	case pDisplayName:
+		p.DisplayName = text
+	case pCalendarColor:
+		p.Color = text
+	case pCalendarOrder:
+		p.Order = text
+	default:
+		return http.StatusForbidden
+	}
+	return http.StatusOK
+}
+
 func isKnownComp(name string) bool {
 	switch name {
 	case "VEVENT", "VTODO", "VJOURNAL", "VFREEBUSY":
@@ -302,6 +346,10 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, res *resource) {
 		badRequest(w, "invalid resource name")
 		return
 	}
+	if res.acc < accWrite {
+		needPrivileges(w)
+		return
+	}
 	ns := dav.NSCalDAV
 	if !res.isCalendar() {
 		ns = dav.NSCardDAV
@@ -326,7 +374,7 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, res *resource) {
 	info, created, err := res.col.Put(res.name, data, conds(r))
 	var uidErr *store.UIDConflictError
 	if errors.As(err, &uidErr) {
-		href := homeHref(res.sk, res.owner) + res.colName + "/" + uidErr.Existing
+		href := res.object(store.ObjectInfo{Name: uidErr.Existing}, true).href()
 		w.Header().Set("Content-Type", `application/xml; charset="utf-8"`)
 		w.WriteHeader(http.StatusConflict)
 		fmt.Fprintf(w, `<?xml version="1.0" encoding="utf-8"?>`+"\n"+`<d:error xmlns:d="DAV:" xmlns:x="%s"><x:no-uid-conflict>%s</x:no-uid-conflict></d:error>`+"\n",
@@ -390,6 +438,10 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, res *resource) {
 			http.NotFound(w, r)
 			return
 		}
+		if res.acc < accWrite {
+			needPrivileges(w)
+			return
+		}
 		if err := res.col.Delete(res.name, conds(r)); err != nil {
 			s.httpError(w, err)
 			return
@@ -398,6 +450,14 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, res *resource) {
 		if res.col == nil {
 			http.NotFound(w, r)
 			return
+		}
+		if res.isShared() {
+			// A sharee "deleting" a shared collection hides it for them.
+			if err := s.store.UpdateSharePrefs(res.owner, res.col.Key(), func(p *store.SharePrefs) { p.Hidden = true }); err != nil {
+				s.httpError(w, err)
+				return
+			}
+			break
 		}
 		if err := s.store.DeleteCollection(res.col); err != nil {
 			s.httpError(w, err)
@@ -425,6 +485,8 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, res *resource) {
 		s.calendarQuery(w, r, user, res, body)
 	case dav.N(dav.NSCardDAV, "addressbook-query"):
 		s.addressbookQuery(w, r, user, res, body)
+	case dav.N(dav.NSCalDAV, "free-busy-query"):
+		s.freeBusyQuery(w, res, body)
 	case dav.N(dav.NSDAV, "sync-collection"):
 		s.syncCollection(w, user, res, body)
 	case dav.N(dav.NSDAV, "principal-search-property-set"):
@@ -589,4 +651,38 @@ func (s *Server) addressbookQuery(w http.ResponseWriter, r *http.Request, user s
 		ms.Responses = append(ms.Responses, s.responseFor(user, o, props, false))
 	}
 	ms.Write(w)
+}
+
+// freeBusyQuery implements CALDAV:free-busy-query (RFC 4791 §7.10) on a
+// calendar: a VFREEBUSY of the busy time within the requested range.
+func (s *Server) freeBusyQuery(w http.ResponseWriter, res *resource, body *dav.Element) {
+	if res.kind != kCollection || res.col == nil || !res.isCalendar() {
+		dav.WriteError(w, http.StatusForbidden, dav.N(dav.NSDAV, "supported-report"), "free-busy-query is only supported on calendars")
+		return
+	}
+	tr := body.Child(dav.NSCalDAV, "time-range")
+	if tr == nil || tr.Attr("start") == "" || tr.Attr("end") == "" {
+		badRequest(w, "free-busy-query needs a time-range with start and end")
+		return
+	}
+	from, to, err := caldav.ParseTimeRange(tr)
+	if err != nil || !to.After(from) {
+		badRequest(w, "invalid time-range")
+		return
+	}
+	var cals []*ical.Component
+	for _, o := range res.col.List() {
+		data, _, err := res.col.Get(o.Name)
+		if err != nil {
+			continue
+		}
+		if cal, err := ical.ParseBytes(data); err == nil {
+			cals = append(cals, cal)
+		}
+	}
+	floating := caldav.FloatingZone(res.col.Meta().Timezone)
+	out := caldav.FreeBusyCalendar(caldav.FreeBusy(cals, from, to, floating), from, to, time.Now()).Bytes()
+	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
+	w.Write(out)
 }

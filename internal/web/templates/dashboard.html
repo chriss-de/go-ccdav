@@ -1,0 +1,168 @@
+{{define "dashboard.html"}}{{template "head"}}
+<header>
+  <span class="brand">ccdav</span>
+  <span class="row"><span class="muted">{{.Name}}</span>
+    <form class="inline" method="post" action="{{.Prefix}}logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="secondary" type="submit">Sign out</button></form>
+  </span>
+</header>
+<main>
+{{if .Msg}}<div class="flash ok">{{.Msg}}</div>{{end}}
+{{if .Error}}<div class="flash err">{{.Error}}</div>{{end}}
+
+<section>
+  <h2>Connect a device</h2>
+  <p>Server URL <code>{{.DAVURL}}</code> &middot; user name <code>{{.User}}</code> &middot; password: an app password from below.</p>
+  <p class="muted">DAVx⁵: "Login with URL and user name". Apple: add a CalDAV / CardDAV account with the server's host name.</p>
+</section>
+
+<section>
+  <h2>App passwords</h2>
+  {{if .NewPassword}}
+    <div class="flash ok">New app password for <b>{{.NewPasswordName}}</b>. Copy it now, it won't be shown again:
+      <code class="secret">{{.NewPassword}}</code></div>
+  {{end}}
+  {{if .AppPasswords}}
+  <table>
+    {{range .AppPasswords}}
+    <tr><td>{{.Name}} <span class="muted">· created {{.Created.Format "2006-01-02"}} · {{if .LastUsed.IsZero}}never used{{else}}last used {{.LastUsed.Format "2006-01-02"}}{{end}}</span></td>
+      <td><form class="inline" method="post" action="{{$.Prefix}}app-passwords/revoke"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="id" value="{{.ID}}"><button class="danger" type="submit">Revoke</button></form></td></tr>
+    {{end}}
+  </table>
+  {{else}}<p class="muted">No app passwords yet. Create one per device, so you can revoke a lost phone without touching the others.</p>{{end}}
+  <form method="post" action="{{.Prefix}}app-passwords" class="row" style="margin-top:.75rem">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="text" name="name" placeholder="Device name, e.g. Phone" maxlength="100" required>
+    <button type="submit">Create app password</button>
+  </form>
+</section>
+
+<section>
+  <h2>Calendars</h2>
+  {{range .Calendars}}{{template "own" (pair $ .)}}{{else}}<p class="muted">No calendars.</p>{{end}}
+  {{if .SharedCalendars}}<h3>Shared with you</h3>{{range .SharedCalendars}}{{template "shared" (pair $ .)}}{{end}}{{end}}
+  <div class="actions" data-actions><details><summary>New calendar</summary>
+    <form method="post" action="{{.Prefix}}collections" class="row">
+      <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="kind" value="calendars">
+      <input type="text" name="displayname" placeholder="Name" maxlength="100" required>
+      {{template "cw" "#3a87ad"}}
+      <label><input type="checkbox" name="components" value="VEVENT" checked> events</label>
+      <label><input type="checkbox" name="components" value="VTODO"> tasks</label>
+      <label><input type="checkbox" name="components" value="VJOURNAL"> journal</label>
+      <button type="submit">Create</button>
+    </form>
+    <p class="muted">Apple Reminders wants tasks in a calendar of their own.</p>
+  </details></div>
+</section>
+
+<section>
+  <h2>Address books</h2>
+  {{range .AddressBooks}}{{template "own" (pair $ .)}}{{else}}<p class="muted">No address books.</p>{{end}}
+  {{if .SharedAddressBooks}}<h3>Shared with you</h3>{{range .SharedAddressBooks}}{{template "shared" (pair $ .)}}{{end}}{{end}}
+  <div class="actions" data-actions><details><summary>New address book</summary>
+    <form method="post" action="{{.Prefix}}collections" class="row">
+      <input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="kind" value="addressbooks">
+      <input type="text" name="displayname" placeholder="Name" maxlength="100" required>
+      <button type="submit">Create</button>
+    </form>
+  </details></div>
+</section>
+</main>
+<script src="{{.Prefix}}static/colorwheel.js"></script>
+<script src="{{.Prefix}}static/actions.js"></script>
+</body></html>
+{{end}}
+
+{{define "cw"}}<span class="cw" data-cw><input type="text" name="color" value="{{.}}" pattern="#[0-9a-fA-F]{6}" maxlength="7" size="8" title="Color as #rrggbb" aria-label="Color"></span>{{end}}
+
+{{define "counts"}}{{if eq .Kind "calendars"}}{{range .Comps}}<span class="badge">{{.Name}} <b>{{.Count}}</b></span>{{end}}{{else}}<span class="badge"><b>{{.Count}}</b> contact{{if ne .Count 1}}s{{end}}</span>{{end}}{{end}}
+
+{{define "own"}}{{$p := .P}}{{$c := .C}}
+<div class="col">
+  <div class="col-head">
+    {{if eq $c.Kind "calendars"}}{{if $c.Color}}<span class="dot" style="background:{{inputColor $c.Color}}"></span>{{else}}<span class="dot nocolor" title="No color set"></span>{{end}}{{end}}
+    <span class="col-name">{{$c.DisplayName}}</span>
+    {{template "counts" $c}}
+    {{range $c.Shares}}<span class="badge">{{.Target}} · {{.Access}}</span>{{end}}
+  </div>
+  {{if $c.Description}}<div class="muted">{{$c.Description}}</div>{{end}}
+  <div class="actions" data-actions>
+  <details name="act-{{$c.Key}}"><summary>Edit</summary>
+    <form method="post" action="{{$p.Prefix}}collections/edit" class="row">
+      <input type="hidden" name="csrf" value="{{$p.CSRF}}"><input type="hidden" name="key" value="{{$c.Key}}">
+      <input type="text" name="displayname" value="{{$c.DisplayName}}" maxlength="100" required>
+      {{if eq $c.Kind "calendars"}}{{template "cw" (inputColor $c.Color)}}{{end}}
+      <input type="text" name="description" value="{{$c.Description}}" placeholder="Description" maxlength="500">
+      {{if eq $c.Kind "calendars"}}
+      <label><input type="checkbox" name="components" value="VEVENT"{{if has $c.Components "VEVENT"}} checked{{end}}> events</label>
+      <label><input type="checkbox" name="components" value="VTODO"{{if has $c.Components "VTODO"}} checked{{end}}> tasks</label>
+      <label><input type="checkbox" name="components" value="VJOURNAL"{{if has $c.Components "VJOURNAL"}} checked{{end}}> journal</label>
+      {{end}}
+      <button type="submit">Save</button>
+    </form>
+    {{if eq $c.Kind "calendars"}}<p class="muted">A type can only be removed while the calendar has no entries of it. Devices pick up type changes when they refresh their calendar list.</p>{{end}}
+  </details>
+  <details name="act-{{$c.Key}}"><summary>Import / export</summary>
+    <div class="row"><a href="{{$p.Prefix}}export?key={{$c.Key}}">Download as {{if eq $c.Kind "calendars"}}.ics{{else}}.vcf{{end}}</a></div>
+    <form method="post" action="{{$p.Prefix}}import" enctype="multipart/form-data" class="row">
+      <input type="hidden" name="csrf" value="{{$p.CSRF}}"><input type="hidden" name="key" value="{{$c.Key}}">
+      <input type="file" name="file" accept="{{if eq $c.Kind "calendars"}}.ics,text/calendar{{else}}.vcf,text/vcard{{end}}" required>
+      <button type="submit">Import</button>
+    </form>
+    <p class="muted">Entries with a UID that already exists here are updated, so importing the same file twice doesn't create duplicates.</p>
+  </details>
+  <details name="act-{{$c.Key}}"><summary>Sharing</summary>
+    {{if $c.Shares}}<table>
+      {{range $c.Shares}}<tr><td>{{.Target}} <span class="muted">· {{if eq .Access "write"}}read-write{{else}}read-only{{end}}</span></td>
+        <td><form class="inline" method="post" action="{{$p.Prefix}}shares/remove"><input type="hidden" name="csrf" value="{{$p.CSRF}}"><input type="hidden" name="key" value="{{$c.Key}}"><input type="hidden" name="target" value="{{.Target}}"><button class="danger" type="submit">Remove</button></form></td></tr>{{end}}
+    </table>{{end}}
+    {{if $p.ShareTargets}}
+    <form method="post" action="{{$p.Prefix}}shares" class="row">
+      <input type="hidden" name="csrf" value="{{$p.CSRF}}"><input type="hidden" name="key" value="{{$c.Key}}">
+      <select name="target" required>{{range $p.ShareTargets}}<option value="{{.}}">{{.}}</option>{{end}}</select>
+      <select name="access"><option value="read">read-only</option><option value="write">read-write</option></select>
+      <button type="submit">Share</button>
+    </form>
+    <p class="muted">Shared collections show up on the other person's devices automatically.</p>
+    {{else}}<p class="muted">There is nobody to share with yet.</p>{{end}}
+  </details>
+  <details name="act-{{$c.Key}}" data-danger><summary>Delete</summary>
+    <form method="post" action="{{$p.Prefix}}collections/delete" class="row">
+      <input type="hidden" name="csrf" value="{{$p.CSRF}}"><input type="hidden" name="key" value="{{$c.Key}}">
+      <label><input type="checkbox" name="confirm" value="yes" required> Really delete <b>{{$c.DisplayName}}</b> and its {{$c.Count}} item{{if ne $c.Count 1}}s{{end}}{{if $c.Shares}}, also for everyone it's shared with{{end}}</label>
+      <button class="danger" type="submit">Delete</button>
+    </form>
+  </details>
+  </div>
+</div>
+{{end}}
+
+{{define "shared"}}{{$p := .P}}{{$c := .C}}
+<div class="col">
+  <div class="col-head">
+    {{if eq $c.Kind "calendars"}}{{if $c.Color}}<span class="dot" style="background:{{inputColor $c.Color}}"></span>{{else}}<span class="dot nocolor" title="No color set"></span>{{end}}{{end}}
+    <span class="col-name">{{$c.DisplayName}}</span>
+    <span class="badge">from {{$c.Owner}}</span>
+    <span class="badge">{{if eq $c.Access "write"}}read-write{{else}}read-only{{end}}</span>
+    {{template "counts" $c}}
+    {{if $c.Hidden}}<span class="badge">hidden</span>{{end}}
+  </div>
+  <div class="actions" data-actions>
+  <details name="act-{{$c.Key}}"><summary>Your view</summary>
+    <form method="post" action="{{$p.Prefix}}collections/edit" class="row">
+      <input type="hidden" name="csrf" value="{{$p.CSRF}}"><input type="hidden" name="key" value="{{$c.Key}}">
+      <input type="text" name="displayname" value="{{$c.DisplayName}}" maxlength="100">
+      {{if eq $c.Kind "calendars"}}{{template "cw" (inputColor $c.Color)}}{{end}}
+      <button type="submit">Save</button>
+    </form>
+    <form method="post" action="{{$p.Prefix}}collections/hide" class="row">
+      <input type="hidden" name="csrf" value="{{$p.CSRF}}"><input type="hidden" name="key" value="{{$c.Key}}">
+      {{if $c.Hidden}}<input type="hidden" name="hidden" value="0"><button class="secondary" type="submit">Show on my devices</button>
+      {{else}}<input type="hidden" name="hidden" value="1"><button class="secondary" type="submit">Hide from my devices</button>{{end}}
+    </form>
+  </details>
+  <details name="act-{{$c.Key}}"><summary>Export</summary>
+    <div class="row"><a href="{{$p.Prefix}}export?key={{$c.Key}}">Download as {{if eq $c.Kind "calendars"}}.ics{{else}}.vcf{{end}}</a></div>
+  </details>
+  </div>
+</div>
+{{end}}

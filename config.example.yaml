@@ -1,16 +1,44 @@
-# davd configuration. Lives in the data directory as config.yaml.
+# ccdav configuration. Lives in the data directory as config.yaml.
 # Reload without restart: kill -HUP <pid>  (or podman kill -s HUP <container>)
 
-# Public URL behind the reverse proxy; used for links in emails (RSVP).
+# URL paths of the DAV tree and (from milestone 7) the web UI. Nothing is
+# served at "/" itself; only /.well-known/caldav|carddav (redirect to
+# dav_prefix) and /healthz live outside these. They must not overlap.
+# Changing them needs a restart and breaks existing client accounts.
+dav_prefix: /dav/
+ui_prefix: /ui/
+
+# Reverse proxies (CIDRs or addresses) whose X-Forwarded-For is trusted.
+# The real client IP is logged and used for login rate limiting
+# (10 failures per IP and user, 50 per IP, within 15 minutes). Leave empty
+# when ccdav is reachable directly; e.g. the podman network of your proxy:
+# trusted_proxies: [10.88.0.0/16]
+
+# Public URL behind the reverse proxy. Used for the OIDC redirect URI
+# (<base_url><ui_prefix>callback) and for links in emails.
 base_url: https://dav.example.com
+
+# Web UI login via OpenID Connect. Without this block the UI accepts the
+# config.yaml password instead. Only users listed below can log in: the
+# username_claim from the userinfo endpoint must equal a user name or email.
+# oidc:
+#   issuer: https://auth.example.com/realms/home
+#   client_id: ccdav
+#   client_secret: change-me
+#   username_claim: preferred_username   # default
+#   name: Authentik                      # login button label
 
 users:
   alice:
-    # davd hash-password  (or: make hash-password). This one is "alice".
+    # Optional: fallback password for DAV clients and (without OIDC) the UI.
+    # Devices should use app passwords created in the web UI instead.
+    # ccdav hash-password  (or: make hash-password). This one is "alice".
     password: pbkdf2-sha256$600000$J5xw4iIT4MtKT67ZYgI0GQ$4ujnnC7z3r6KDutVDohybYCARLOkkWaEU+Ymq+9hJ3U
     email: alice@example.com
     name: Alice
 
+# Groups can be share targets ("ccdav share ... group:family read") and show
+# up as principals under <dav_prefix>principals/groups/<name>/.
 groups:
   family: [alice]
 
@@ -18,7 +46,7 @@ groups:
 # smtp:
 #   host: smtp.example.com
 #   port: 587
-#   username: davd@example.com
+#   username: ccdav@example.com
 #   password: secret
-#   from: "Calendar <davd@example.com>"
+#   from: "Calendar <ccdav@example.com>"
 # rsvp_secret: change-me-to-a-long-random-string

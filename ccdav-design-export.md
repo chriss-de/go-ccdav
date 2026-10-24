@@ -1,7 +1,7 @@
-# davd — Go CalDAV/CardDAV server: design export
+# ccdav — Go CalDAV/CardDAV server: design export
 
 Exported 2026-10-22 from a Claude Code session, to continue the work on another machine.
-Hand this file to a new session: "Read davd-design-export.md and continue from there."
+Hand this file to a new session: "Read ccdav-design-export.md and continue from there."
 
 ---
 
@@ -22,7 +22,7 @@ Hand this file to a new session: "Read davd-design-export.md and continue from t
   - The server sends invitations itself and advertises `calendar-auto-schedule`.
   - RSVP uses the server's own HMAC-signed links (GET shows a confirmation page, POST records the answer), plus implicit scheduling for internal attendees. Receiving reply emails (IMAP, SMTP receiver, inbound webhook) is deferred.
   - Write our own RRULE expander with no dependencies, tested against ported test vectors. `teambition/rrule-go` is the fallback if this gets out of hand.
-- **Status (2026-10-23):** milestones 1–5 implemented (see README.md). Build via Makefile, deploy as a container behind a TLS-terminating reverse proxy. Calendars tested with DAVx⁵. Next: milestone 6 (sharing).
+- **Status (2026-10-23):** milestones 1–7 implemented (see README.md). Build via Makefile, deploy as a container behind a TLS-terminating reverse proxy. Calendars and contacts tested with DAVx⁵. Next: milestone 8 (scheduling / iMIP).
 
 ---
 
@@ -77,7 +77,7 @@ data/
 
 - **Atomic writes:** temp file, `fsync`, then `os.Rename`.
 - **ETag:** SHA-256 of the content, cached in memory.
-- **Sync token / CTag:** a monotonic counter, the last line of `.changes.log`. Property changes (PROPPATCH) log a `META` line and bump it too. The token URI is `http://davd/ns/sync/<sync_id>-<n>`; `sync_id` is random per collection, so tokens of a recreated collection are rejected.
+- **Sync token / CTag:** a monotonic counter, the last line of `.changes.log`. Property changes (PROPPATCH) log a `META` line and bump it too. The token URI is `http://ccdav/ns/sync/<sync_id>-<n>`; `sync_id` is random per collection, so tokens of a recreated collection are rejected.
 - **Compaction:** when the log exceeds 2× objects + 1000 lines, keep the newest line per name and at most 1000 tombstones; a `FLOOR n` line marks the oldest answerable token (older → 403 `valid-sync-token`, client resyncs).
 - **Locking:** one `sync.RWMutex` per collection. Load indexes into memory at startup; at 100 users that's fine.
 - **Search:** none. Queries scan the collection.
@@ -89,7 +89,17 @@ data/
 - Contact groups (Apple `X-ADDRESSBOOKSERVER-KIND/MEMBER`, vCard 4 `KIND/MEMBER`, `CATEGORIES`) are client data. The server doesn't validate, clean up or convert them.
 - Default address book: `contacts`.
 
-## 5. Sharing (users and groups)
+## 5. Sharing (users and groups), as implemented (2026-10-24)
+
+- Shares in the owner's `.meta.json`, `read` or `write` (write = create/change/delete objects; the collection itself stays owner-only). Highest of direct and group shares wins; group membership is evaluated live.
+- Shared collections appear **automatically** in the sharee's home as `<owner>~<name>` (`~` is reserved in new collection names; the alias format lives in one function and could change later at the cost of clients re-adding shared collections). The owner's real path stays owner-only.
+- Per-sharee name/color/order in `data/users/<u>/shared.json`; their version is appended to the sharee's CTag/sync token (`…-<n>.<v>`). Sharee DELETE on the collection hides it for them.
+- Read-only: `current-user-privilege-set` without `write-content`, writes → 403 `need-privileges`.
+- Group principals at `<prefix>principals/groups/<g>/` (`group-member-set`), `group-membership` on users.
+- `dav_prefix` / `ui_prefix` configurable; nothing at `/` except `/.well-known/*` and `/healthz`.
+- Until the web UI: `ccdav share|unshare|shares`, applied by SIGHUP.
+
+### Original notes
 
 ```json
 "shares": [
@@ -102,6 +112,23 @@ data/
 - All access checks go through one function, `can(user, collection) -> none|read|write`, which also feeds `current-user-privilege-set`.
 - **Group principals (with milestone 6):** expose `config.yaml` groups as read-only principals `/dav/principals/groups/<group>/` with `DAV:group-member-set`, and `DAV:group-membership` on user principals. Used by sharing UIs and, in milestone 7, to expand `ATTENDEE;CUTYPE=GROUP` into one invitation per member.
 - Users and groups live in `config.yaml` and are reloaded on SIGHUP. A small admin page (`html/template`) can come later.
+
+## 5b. Web UI, as implemented (2026-10-24)
+
+- Under `ui_prefix`; server-rendered `html/template`, no JavaScript. Strict CSP, `no-store`.
+- Login: OIDC authorization code + PKCE via `golang.org/x/oauth2`, identity from the userinfo endpoint (no ID-token verification needed: back-channel exchange over TLS with client secret). `username_claim` (default `preferred_username`) must match a `config.yaml` user name or email (allowlist). Without `oidc:`, password login with the `config.yaml` password.
+- Sessions and the OIDC state/PKCE verifier are HMAC-signed cookies (`data/session.key`), 12 h; CSRF token bound to the session on every POST; SameSite=Lax, Secure behind HTTPS.
+- App passwords: 120-bit random, SHA-256 hashed, in `data/users/<u>/app-passwords.json`, named and revocable, shown once. DAV Basic auth checks them first, then the `config.yaml` password (kept as fallback).
+- Groups stay in `config.yaml` only.
+
+## 5c. Gap closing (2026-10-24)
+
+- Login rate limiting: per IP+user 10 / per IP 50 failures in 15 min → 429 + Retry-After; shared between DAV and UI; success resets the pair.
+- `trusted_proxies`: X-Forwarded-For only from trusted peers, rightmost untrusted hop wins.
+- UI export (.ics merged with deduplicated VTIMEZONEs / .vcf concatenated) and import (split by UID, same UID replaces, invalid/unsupported skipped, 50 MB).
+- UI delete for own collections with confirmation checkbox.
+- App passwords record last use (persisted at most hourly).
+- `free-busy-query` REPORT. Attendee availability in clients needs the scheduling outbox (milestone 8).
 
 ## 6. Invitations (iMIP) and RSVP
 
@@ -196,7 +223,7 @@ func Expand(cal *ical.Calendar, uid string, from, to time.Time) iter.Seq[Occurre
 ## 10. Package sketch
 
 ```
-cmd/davd/main.go
+cmd/ccdav/main.go
 internal/
   config/     users, groups, shares, reload
   auth/       basic auth, pbkdf2
@@ -218,12 +245,12 @@ internal/
 3. **ical parser, RRULE expander and timezone resolution, with full tests** (milestone 2.5 in the chat; the biggest single piece). Time-range queries for VEVENT, VTODO and VJOURNAL.
 4. **Sync:** sync-collection and ctag.
 5. **CardDAV.**
-6. **Sharing:** shares in `.meta.json`, the `can()` check, shared collections listed in the sharee's home.
-7. **Scheduling:** attendee diffing, iMIP REQUEST and CANCEL (including per-instance), internal attendee copies and PARTSTAT merge-back.
-8. **RSVP links:** HMAC tokens, confirmation page, POST, PARTSTAT update, organizer notification.
-9. **Hardening:** client matrix tests, fuzzing, deployment behind a TLS-terminating reverse proxy.
-10. **(Optional) Directory address book:** a generated, read-only address book with one vCard per user (name, email) and one group vCard per `config.yaml` group, for autocomplete and "invite family". About 150 lines; open question: in every user's home automatically, or opt-in.
-11. **(Optional) Admin UI:** users, groups and shares via `html/template`.
+6. **Sharing:** shares in `.meta.json`, the `can()` check, shared collections listed in the sharee's home. Plus configurable prefixes and group principals.
+7. **Web UI** (under `ui_prefix`): OIDC login, app passwords, list of calendars/address books with item counts, change name/color, create collections, manage sharing.
+8. **Scheduling:** attendee diffing, iMIP REQUEST and CANCEL (including per-instance), internal attendee copies and PARTSTAT merge-back.
+9. **RSVP links:** HMAC tokens, confirmation page, POST, PARTSTAT update, organizer notification.
+10. **Hardening:** client matrix tests, fuzzing, deployment behind a TLS-terminating reverse proxy.
+11. **(Optional) Directory address book:** a generated, read-only address book with one vCard per user (name, email) and one group vCard per `config.yaml` group, for autocomplete and "invite family". About 150 lines; open question: in every user's home automatically, or opt-in.
 
 Rough size: about 5–7k lines of Go.
 
@@ -231,7 +258,7 @@ Rough size: about 5–7k lines of Go.
 
 - **Receiving reply emails (option C):** no IMAP polling, no SMTP receiver, no mail parsing. At most, later, an inbound-mail webhook (e.g. Mailgun/Postmark posting the parsed `text/calendar` part).
 - **Admin UI:** not now; editing `config.yaml` (reload on SIGHUP) is enough. Possible milestone 10.
-- **TLS:** not in the binary. A reverse proxy (Caddy/nginx) terminates TLS; davd listens on plain HTTP and must honor `X-Forwarded-Proto`/`X-Forwarded-Host` when building absolute URLs (RSVP links, hrefs).
+- **TLS:** not in the binary. A reverse proxy (Caddy/nginx) terminates TLS; ccdav listens on plain HTTP and must honor `X-Forwarded-Proto`/`X-Forwarded-Host` when building absolute URLs (RSVP links, hrefs).
 
 ---
 

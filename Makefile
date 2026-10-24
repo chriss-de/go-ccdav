@@ -1,10 +1,10 @@
-BINARY   := davd
-PKG      := ./cmd/davd
+BINARY   := ccdav
+PKG      := ./cmd/ccdav
 VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS  := -s -w -X main.version=$(VERSION)
 
 ENGINE   ?= podman
-IMAGE    ?= davd
+IMAGE    ?= ccdav
 TAG      ?= $(VERSION)
 DATA     ?= $(CURDIR)/data
 PORT     ?= 8080
@@ -21,7 +21,7 @@ all: check build
 help: ## show targets
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'
 
-build: ## build bin/davd
+build: ## build bin/ccdav
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/$(BINARY) $(PKG)
 
 test: ## run unit tests

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -58,5 +59,70 @@ func TestFind(t *testing.T) {
 	write(t, dir, "config.yaml", "")
 	if p, err := Find(dir); err != nil || filepath.Base(p) != "config.yaml" {
 		t.Fatal(p, err)
+	}
+}
+
+func TestPrefixes(t *testing.T) {
+	dir := t.TempDir()
+	c, err := Load(write(t, dir, "config.yaml", "users: {}\n"))
+	if err != nil || c.DAVPrefix != "/dav/" || c.UIPrefix != "/ui/" {
+		t.Fatal(c, err)
+	}
+	c, err = Load(write(t, dir, "config.yaml", "dav_prefix: caldav\nui_prefix: /admin/x\n"))
+	if err != nil || c.DAVPrefix != "/caldav/" || c.UIPrefix != "/admin/x/" {
+		t.Fatal(c, err)
+	}
+	for _, bad := range []string{
+		"dav_prefix: /\n",
+		"dav_prefix: /a b/\n",
+		"dav_prefix: /x/\nui_prefix: /x/\n",
+		"dav_prefix: /dav/\nui_prefix: /dav/ui/\n",
+		"users:\n  groups:\n    password: x\n",
+		"users: {}\ngroups:\n  Bad: []\n",
+	} {
+		if _, err := Load(write(t, dir, "config.yaml", bad)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	p := write(t, dir, "config.yaml", "users: {}\n")
+	st, err := NewStore(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, dir, "config.yaml", "dav_prefix: /other/\n")
+	if err := st.Reload(); err == nil || st.Get().DAVPrefix != "/dav/" {
+		t.Fatal("prefix change on reload must be rejected", err)
+	}
+}
+
+func TestGroupsOf(t *testing.T) {
+	c := &Config{Groups: map[string][]string{"b": {"alice"}, "a": {"alice", "bob"}, "c": {"bob"}}}
+	if got := c.GroupsOf("alice"); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatal(got)
+	}
+}
+
+func TestOIDCConfig(t *testing.T) {
+	dir := t.TempDir()
+	c, err := Load(write(t, dir, "config.yaml", "base_url: https://x.example/\noidc:\n  issuer: https://idp.example\n  client_id: ccdav\nusers:\n  alice:\n    email: Alice@Example.com\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.OIDC.UsernameClaim != "preferred_username" || len(c.OIDC.Scopes) != 3 || c.BaseURL != "https://x.example" {
+		t.Fatalf("%+v %q", c.OIDC, c.BaseURL)
+	}
+	if u, ok := c.UserByLogin("alice@example.com"); !ok || u != "alice" {
+		t.Fatal(u, ok)
+	}
+	if _, ok := c.UserByLogin("mallory"); ok {
+		t.Fatal("unknown login accepted")
+	}
+	for _, bad := range []string{
+		"oidc:\n  issuer: https://idp\n  client_id: x\n", // no base_url
+		"base_url: https://x\noidc:\n  client_id: x\n",   // no issuer
+	} {
+		if _, err := Load(write(t, dir, "config.yaml", bad)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
 	}
 }

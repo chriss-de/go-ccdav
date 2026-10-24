@@ -1,52 +1,61 @@
 // Package server is the HTTP front: routing, authentication and the
 // WebDAV / CalDAV / CardDAV methods on top of store, dav, caldav and carddav.
 //
-// URL layout:
+// URL layout, below the configurable DAV prefix (default /dav/):
 //
-//	/.well-known/caldav, carddav       -> 301 /dav/
-//	/dav/                              root (current-user-principal discovery)
-//	/dav/principals/<user>/            principal
-//	/dav/calendars/<user>/             calendar home
-//	/dav/calendars/<user>/<cal>/       calendar collection
-//	/dav/calendars/<user>/<cal>/<x>    calendar object (.ics)
-//	/dav/addressbooks/<user>/          address book home
-//	/dav/addressbooks/<user>/<book>/   address book
-//	/dav/addressbooks/<user>/<book>/<x> contact (.vcf)
+//	/.well-known/caldav, carddav     -> 301 <prefix>
+//	<prefix>                         root (current-user-principal discovery)
+//	<prefix>principals/<user>/       principal
+//	<prefix>principals/groups/<g>/   group principal (config.yaml groups)
+//	<prefix>calendars/<user>/        calendar home
+//	<prefix>calendars/<user>/<cal>/  calendar (own)
+//	<prefix>calendars/<user>/<owner>~<cal>/  calendar shared with <user>
+//	<prefix>calendars/.../<x>        calendar object (.ics)
+//	<prefix>addressbooks/...         the same for address books (.vcf)
+//
+// Nothing else is served by this handler; "/" is 404.
 package server
 
 import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
-	"davd/internal/auth"
-	"davd/internal/caldav"
-	"davd/internal/carddav"
-	"davd/internal/config"
-	"davd/internal/store"
+	"github.com/chriss-de/go-ccdav/internal/auth"
+	"github.com/chriss-de/go-ccdav/internal/caldav"
+	"github.com/chriss-de/go-ccdav/internal/carddav"
+	"github.com/chriss-de/go-ccdav/internal/clientip"
+	"github.com/chriss-de/go-ccdav/internal/config"
+	"github.com/chriss-de/go-ccdav/internal/store"
 )
 
 const maxResourceSize = 10 << 20
 
 type Server struct {
-	cfg   *config.Store
-	store *store.Store
-	auth  *auth.Cache
-	log   *slog.Logger
+	prefix  string // DAV prefix, fixed for the server's lifetime
+	cfg     *config.Store
+	store   *store.Store
+	auth    *auth.Cache
+	appPass *auth.AppPasswords
+	limit   *auth.Limiter
+	log     *slog.Logger
 }
 
-func New(cfg *config.Store, st *store.Store, log *slog.Logger) *Server {
-	return &Server{cfg: cfg, store: st, auth: auth.NewCache(15 * time.Minute), log: log}
+// New creates the DAV handler. ap and lim are shared with the web UI.
+func New(cfg *config.Store, st *store.Store, ap *auth.AppPasswords, lim *auth.Limiter, log *slog.Logger) *Server {
+	return &Server{prefix: cfg.Get().DAVPrefix, cfg: cfg, store: st, auth: auth.NewCache(15 * time.Minute),
+		appPass: ap, limit: lim, log: log}
 }
 
-// DefaultCalendars are created in a user's calendar home on first access.
-// Apple expects tasks in a separate collection, so events and tasks are split.
+// DefaultCalendars are created in a user's calendar home on first access:
+// one "Personal" calendar for events, tasks and journal entries. (Apple
+// Reminders prefers tasks in a calendar of their own; users can create
+// one in the web UI.)
 var DefaultCalendars = map[string]store.Meta{
-	"default": {DisplayName: "Calendar", Components: []string{"VEVENT"}},
-	"tasks":   {DisplayName: "Tasks", Components: []string{"VTODO"}},
-	"journal": {DisplayName: "Journal", Components: []string{"VJOURNAL"}},
+	"personal": {DisplayName: "Personal", Color: "#3a87ad", Components: []string{"VEVENT", "VTODO", "VJOURNAL"}},
 }
 
 // DefaultAddressBooks are created in a user's address book home on first
@@ -56,9 +65,9 @@ var DefaultAddressBooks = map[string]store.Meta{
 }
 
 // UIDOf is the store.UIDFunc for this server.
-func UIDOf(k store.Kind, data []byte) string {
+func UIDOf(k store.Kind, data []byte) (uid, comp string) {
 	if k == store.AddressBooks {
-		return carddav.UIDOf(data)
+		return carddav.UIDOf(data), ""
 	}
 	return caldav.UIDOf(data)
 }
@@ -85,23 +94,20 @@ func (w *statusWriter) Write(b []byte) (int, error) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	sw := &statusWriter{ResponseWriter: w}
-	user := s.serve(sw, r)
+	ip := clientip.From(r, s.cfg.Get().Trusted)
+	user := s.serve(sw, r, ip)
 	s.log.Info("request", "method", r.Method, "path", r.URL.Path, "status", sw.status,
-		"user", user, "dur", time.Since(start).Round(time.Microsecond))
+		"user", user, "ip", ip, "dur", time.Since(start).Round(time.Microsecond))
 }
 
-func (s *Server) serve(w http.ResponseWriter, r *http.Request) (user string) {
-	w.Header().Set("Server", "davd")
+func (s *Server) serve(w http.ResponseWriter, r *http.Request, ip string) (user string) {
+	w.Header().Set("Server", "ccdav")
 	p := r.URL.Path
 	switch {
 	case p == "/.well-known/caldav" || p == "/.well-known/carddav":
-		http.Redirect(w, r, "/dav/", http.StatusMovedPermanently)
+		http.Redirect(w, r, s.prefix, http.StatusMovedPermanently)
 		return ""
-	case p == "/" && r.Method == http.MethodGet:
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte("davd: CalDAV/CardDAV server. Point your client at this host.\n"))
-		return ""
-	case p == "/" || p == "/dav" || strings.HasPrefix(p, "/dav/"):
+	case p+"/" == s.prefix || strings.HasPrefix(p, s.prefix):
 	default:
 		http.NotFound(w, r)
 		return ""
@@ -110,12 +116,26 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (user string) {
 		s.options(w)
 		return ""
 	}
+	name, _, hasAuth := r.BasicAuth()
+	if hasAuth {
+		if ok, wait := s.limit.Allow(ip, name); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())))
+			http.Error(w, "too many failed logins, try again later", http.StatusTooManyRequests)
+			return ""
+		}
+	}
 	user, ok := s.authenticate(r)
 	if !ok {
-		w.Header().Set("WWW-Authenticate", `Basic realm="davd", charset="UTF-8"`)
+		// Clients first ask without credentials; only wrong ones count.
+		if hasAuth {
+			s.limit.Fail(ip, name)
+			s.log.Warn("dav login failed", "user", name, "ip", ip)
+		}
+		w.Header().Set("WWW-Authenticate", `Basic realm="ccdav", charset="UTF-8"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return ""
 	}
+	s.limit.Success(ip, user)
 	r.Body = http.MaxBytesReader(w, r.Body, maxResourceSize)
 	res, err := s.resolve(p, user)
 	if err != nil {
@@ -160,11 +180,15 @@ func (s *Server) authenticate(r *http.Request) (string, bool) {
 		return "", false
 	}
 	u, ok := s.cfg.Get().Users[name]
+	if ok && s.appPass.Verify(name, pw) {
+		return name, true
+	}
 	if !ok || u.Password == "" {
 		// Burn comparable time so user enumeration via timing is harder.
 		auth.Verify("pbkdf2-sha256$600000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", pw)
 		return "", false
 	}
+	// The config.yaml password stays as a fallback.
 	if !s.auth.Verify(name, u.Password, pw) {
 		return "", false
 	}

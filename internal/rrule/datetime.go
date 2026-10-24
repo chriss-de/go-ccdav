@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"davd/internal/ical"
+	"github.com/chriss-de/go-ccdav/internal/ical"
 )
 
 // DateTime is a parsed DATE or DATE-TIME property value.

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"davd/internal/ical"
+	"github.com/chriss-de/go-ccdav/internal/ical"
 )
 
 func loadCal(t testing.TB, name string) *ical.Component {

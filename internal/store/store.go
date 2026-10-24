@@ -55,6 +55,7 @@ type Meta struct {
 	Timezone    string   `json:"timezone,omitempty"`   // VCALENDAR text with one VTIMEZONE
 	Components  []string `json:"components,omitempty"` // VEVENT, VTODO, VJOURNAL
 	SyncID      string   `json:"sync_id,omitempty"`    // see Collection.SyncID
+	Shares      []Share  `json:"shares,omitempty"`
 	// DeadProps stores unknown PROPPATCHed properties: "{ns}local" -> inner XML.
 	DeadProps map[string]string `json:"dead_props,omitempty"`
 }
@@ -64,12 +65,14 @@ type ObjectInfo struct {
 	Name    string
 	ETag    string // quoted
 	UID     string
+	Comp    string // calendar component type (VEVENT, VTODO, ...); "" for vCards
 	Size    int64
 	ModTime time.Time
 }
 
-// UIDFunc extracts the UID from an object body; "" if none.
-type UIDFunc func(kind Kind, data []byte) string
+// UIDFunc extracts the UID and, for calendar objects, the component type
+// from an object body; "" if none.
+type UIDFunc func(kind Kind, data []byte) (uid, comp string)
 
 type Store struct {
 	root  string
@@ -77,6 +80,8 @@ type Store struct {
 
 	mu   sync.Mutex
 	cols map[string]*Collection
+
+	prefs prefsStore
 }
 
 func New(root string, uidOf UIDFunc) *Store {
@@ -98,6 +103,12 @@ func ValidName(name string) bool {
 
 func (s *Store) homeDir(owner string, kind Kind) string {
 	return filepath.Join(s.root, "users", owner, string(kind))
+}
+
+// ValidCollectionName is ValidName for new collections: "~" is reserved
+// for the aliases of shared collections ("<owner>~<name>").
+func ValidCollectionName(name string) bool {
+	return ValidName(name) && !strings.Contains(name, "~")
 }
 
 // EnsureHome creates the home directory if needed. When it did not exist
@@ -166,7 +177,7 @@ func (s *Store) Collection(owner string, kind Kind, name string) (*Collection, e
 
 // CreateCollection makes a new collection.
 func (s *Store) CreateCollection(owner string, kind Kind, name string, m Meta) (*Collection, error) {
-	if !ValidName(name) {
+	if !ValidCollectionName(name) {
 		return nil, ErrBadName
 	}
 	dir := filepath.Join(s.homeDir(owner, kind), name)
@@ -272,10 +283,12 @@ func (c *Collection) load() error {
 
 func (c *Collection) info(name string, data []byte, mod time.Time) ObjectInfo {
 	sum := sha256.Sum256(data)
+	uid, comp := c.uidOf(c.Kind, data)
 	return ObjectInfo{
 		Name:    name,
 		ETag:    `"` + hex.EncodeToString(sum[:16]) + `"`,
-		UID:     c.uidOf(c.Kind, data),
+		UID:     uid,
+		Comp:    comp,
 		Size:    int64(len(data)),
 		ModTime: mod.UTC().Truncate(time.Second),
 	}
@@ -295,6 +308,10 @@ func (c *Collection) UpdateMeta(fn func(*Meta)) error {
 	defer c.mu.Unlock()
 	if c.deleted {
 		return ErrNotFound
+	}
+	// Shares may have been changed on disk by the CLI; don't clobber them.
+	if err := c.refreshMeta(); err != nil {
+		return err
 	}
 	m := c.metaCopy()
 	fn(&m)
@@ -316,6 +333,7 @@ func (c *Collection) metaCopy() Meta {
 	m := c.meta
 	m.Components = slices.Clone(m.Components)
 	m.DeadProps = maps.Clone(m.DeadProps)
+	m.Shares = slices.Clone(m.Shares)
 	return m
 }
 

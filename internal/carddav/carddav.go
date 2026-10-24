@@ -13,8 +13,8 @@ import (
 	"fmt"
 	"strings"
 
-	"davd/internal/dav"
-	"davd/internal/ical"
+	"github.com/chriss-de/go-ccdav/internal/dav"
+	"github.com/chriss-de/go-ccdav/internal/ical"
 )
 
 // Validation errors map to CardDAV preconditions.
@@ -259,4 +259,29 @@ func RenderData(raw []byte, spec *dav.Element) (string, error) {
 		out.Props = append(out.Props, p)
 	}
 	return string(out.Bytes()), nil
+}
+
+// Card is one address object resource produced by Split.
+type Card struct {
+	UID  string
+	Data []byte
+}
+
+// Split turns a .vcf file with any number of vCards into address object
+// resources. vCards that fail Validate are counted as skipped.
+func Split(data []byte) (cards []Card, skipped int, err error) {
+	comps, err := ical.ParseAll(bytes.NewReader(data))
+	if err != nil {
+		return nil, 0, err
+	}
+	for _, c := range comps {
+		b := c.Bytes()
+		uid, err := Validate(b)
+		if err != nil {
+			skipped++
+			continue
+		}
+		cards = append(cards, Card{UID: uid, Data: b})
+	}
+	return cards, skipped, nil
 }

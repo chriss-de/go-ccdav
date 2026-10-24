@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"strings"
 
-	"davd/internal/caldav"
-	"davd/internal/carddav"
-	"davd/internal/dav"
-	"davd/internal/store"
+	"github.com/chriss-de/go-ccdav/internal/caldav"
+	"github.com/chriss-de/go-ccdav/internal/carddav"
+	"github.com/chriss-de/go-ccdav/internal/dav"
+	"github.com/chriss-de/go-ccdav/internal/store"
 )
 
 var (
@@ -19,6 +19,8 @@ var (
 	pCurrentUserPrincipal  = dav.N(dav.NSDAV, "current-user-principal")
 	pPrincipalURL          = dav.N(dav.NSDAV, "principal-URL")
 	pPrincipalCollSet      = dav.N(dav.NSDAV, "principal-collection-set")
+	pGroupMemberSet        = dav.N(dav.NSDAV, "group-member-set")
+	pGroupMembership       = dav.N(dav.NSDAV, "group-membership")
 	pOwner                 = dav.N(dav.NSDAV, "owner")
 	pCurrentUserPrivSet    = dav.N(dav.NSDAV, "current-user-privilege-set")
 	pSupportedReportSet    = dav.N(dav.NSDAV, "supported-report-set")
@@ -54,7 +56,9 @@ func (s *Server) allProps(res *resource) []xml.Name {
 	switch res.kind {
 	case kPrincipal:
 		return append(common, pDisplayName, pPrincipalURL, pPrincipalCollSet, pCalendarHomeSet,
-			pAddressbookHomeSet, pCalendarUserAddrSet, pCalendarUserType, pEmailAddressSet)
+			pAddressbookHomeSet, pCalendarUserAddrSet, pCalendarUserType, pEmailAddressSet, pGroupMembership)
+	case kGroupPrincipal:
+		return append(common, pDisplayName, pPrincipalURL, pPrincipalCollSet, pCalendarUserType, pGroupMemberSet)
 	case kHome:
 		return append(common, pOwner, pDisplayName)
 	case kCollection:
@@ -111,12 +115,12 @@ func reports(names ...xml.Name) string {
 func (s *Server) propValue(user string, res *resource, name xml.Name, req *dav.Element) (string, int) {
 	switch name {
 	case pCurrentUserPrincipal:
-		return hrefs(principalHref(user)), http.StatusOK
+		return hrefs(principalHref(res.base, user)), http.StatusOK
 	case pResourceType:
 		switch res.kind {
 		case kObject:
 			return "", http.StatusOK
-		case kPrincipal:
+		case kPrincipal, kGroupPrincipal:
 			return resourceTypeCollection + dav.E(dav.N(dav.NSDAV, "principal"), ""), http.StatusOK
 		case kCollection:
 			if res.isCalendar() {
@@ -126,38 +130,39 @@ func (s *Server) propValue(user string, res *resource, name xml.Name, req *dav.E
 		}
 		return resourceTypeCollection, http.StatusOK
 	case pCurrentUserPrivSet:
-		if res.kind == kPrincipal && res.owner != user {
-			return privileges("read"), http.StatusOK
-		}
-		return privileges("all", "read", "write", "write-properties", "write-content",
-			"read-current-user-privilege-set", "bind", "unbind"), http.StatusOK
+		return privileges(privilegesFor(user, res)...), http.StatusOK
 	case pSupportedReportSet:
 		switch {
 		case res.kind != kCollection && res.kind != kObject:
 			return "", http.StatusOK
 		case res.isCalendar():
 			return reports(dav.N(dav.NSCalDAV, "calendar-multiget"), dav.N(dav.NSCalDAV, "calendar-query"),
-				dav.N(dav.NSDAV, "sync-collection")), http.StatusOK
+				dav.N(dav.NSCalDAV, "free-busy-query"), dav.N(dav.NSDAV, "sync-collection")), http.StatusOK
 		default:
 			return reports(dav.N(dav.NSCardDAV, "addressbook-multiget"), dav.N(dav.NSCardDAV, "addressbook-query"),
 				dav.N(dav.NSDAV, "sync-collection")), http.StatusOK
 		}
 	case pOwner:
-		if res.kind == kHome || res.kind == kCollection || res.kind == kObject {
-			return hrefs(principalHref(res.owner)), http.StatusOK
+		switch {
+		case res.col != nil:
+			return hrefs(principalHref(res.base, res.col.Owner)), http.StatusOK
+		case res.kind == kHome || res.kind == kCollection:
+			return hrefs(principalHref(res.base, res.owner)), http.StatusOK
 		}
 	}
 
 	switch res.kind {
 	case kPrincipal:
 		return s.principalProp(res, name)
+	case kGroupPrincipal:
+		return s.groupProp(res, name)
 	case kHome:
 		if name == pDisplayName {
 			return dav.Esc(res.owner), http.StatusOK
 		}
 	case kCollection:
 		if res.col != nil {
-			return collectionProp(res, name)
+			return s.collectionProp(res, name)
 		}
 	case kObject:
 		if res.exists {
@@ -167,8 +172,35 @@ func (s *Server) propValue(user string, res *resource, name xml.Name, req *dav.E
 	return "", http.StatusNotFound
 }
 
+// privilegesFor lists the DAV privileges user has on res.
+func privilegesFor(user string, res *resource) []string {
+	acc := res.acc
+	switch res.kind {
+	case kPrincipal, kGroupPrincipal, kPrincipals, kGroups, kRoot:
+		if res.kind == kPrincipal && res.owner == user {
+			acc = accOwner
+		} else {
+			acc = accRead
+		}
+	case kHomes, kHome:
+		acc = accOwner
+	}
+	switch acc {
+	case accOwner:
+		return []string{"all", "read", "write", "write-properties", "write-content",
+			"read-current-user-privilege-set", "bind", "unbind"}
+	case accWrite:
+		// write-properties only touches the sharee's own view (name, color).
+		return []string{"read", "read-current-user-privilege-set", "write", "write-properties",
+			"write-content", "bind", "unbind"}
+	default:
+		return []string{"read", "read-current-user-privilege-set", "write-properties"}
+	}
+}
+
 func (s *Server) principalProp(res *resource, name xml.Name) (string, int) {
-	u := s.cfg.Get().Users[res.owner]
+	cfg := s.cfg.Get()
+	u := cfg.Users[res.owner]
 	switch name {
 	case pDisplayName:
 		dn := u.Name
@@ -177,19 +209,25 @@ func (s *Server) principalProp(res *resource, name xml.Name) (string, int) {
 		}
 		return dav.Esc(dn), http.StatusOK
 	case pPrincipalURL:
-		return hrefs(principalHref(res.owner)), http.StatusOK
+		return hrefs(principalHref(res.base, res.owner)), http.StatusOK
 	case pPrincipalCollSet:
-		return hrefs("/dav/principals/"), http.StatusOK
+		return hrefs(res.base + "principals/"), http.StatusOK
 	case pCalendarHomeSet:
-		return hrefs(homeHref(store.Calendars, res.owner)), http.StatusOK
+		return hrefs(homeHref(res.base, store.Calendars, res.owner)), http.StatusOK
 	case pAddressbookHomeSet:
-		return hrefs(homeHref(store.AddressBooks, res.owner)), http.StatusOK
+		return hrefs(homeHref(res.base, store.AddressBooks, res.owner)), http.StatusOK
+	case pGroupMembership:
+		var out []string
+		for _, g := range cfg.GroupsOf(res.owner) {
+			out = append(out, groupHref(res.base, g))
+		}
+		return hrefs(out...), http.StatusOK
 	case pCalendarUserAddrSet:
 		v := ""
 		if u.Email != "" {
 			v = dav.Href("mailto:" + u.Email)
 		}
-		return v + hrefs(principalHref(res.owner)), http.StatusOK
+		return v + hrefs(principalHref(res.base, res.owner)), http.StatusOK
 	case pCalendarUserType:
 		return "INDIVIDUAL", http.StatusOK
 	case pEmailAddressSet:
@@ -201,6 +239,45 @@ func (s *Server) principalProp(res *resource, name xml.Name) (string, int) {
 	return "", http.StatusNotFound
 }
 
+func (s *Server) groupProp(res *resource, name xml.Name) (string, int) {
+	switch name {
+	case pDisplayName:
+		return dav.Esc(res.owner), http.StatusOK
+	case pPrincipalURL:
+		return hrefs(groupHref(res.base, res.owner)), http.StatusOK
+	case pPrincipalCollSet:
+		return hrefs(res.base + "principals/"), http.StatusOK
+	case pCalendarUserType:
+		return "GROUP", http.StatusOK
+	case pGroupMemberSet:
+		var out []string
+		for _, m := range s.cfg.Get().Groups[res.owner] {
+			out = append(out, principalHref(res.base, m))
+		}
+		return hrefs(out...), http.StatusOK
+	}
+	return "", http.StatusNotFound
+}
+
+// ctag and syncToken of a collection as seen by res.owner: for a shared
+// collection the sharee's preference version is appended, so their own
+// changes (color, name) are noticed too.
+func (s *Server) ctag(res *resource) string {
+	t := strconv.FormatUint(res.col.SyncToken(), 10)
+	if res.isShared() {
+		t += "." + strconv.FormatUint(s.store.SharePrefs(res.owner, res.col.Key()).Version, 10)
+	}
+	return t
+}
+
+func (s *Server) syncToken(res *resource, n uint64) string {
+	t := formatSyncToken(res.col.SyncID(), n)
+	if res.isShared() {
+		t += "." + strconv.FormatUint(s.store.SharePrefs(res.owner, res.col.Key()).Version, 10)
+	}
+	return t
+}
+
 func optional(v string) (string, int) {
 	if v == "" {
 		return "", http.StatusNotFound
@@ -208,8 +285,30 @@ func optional(v string) (string, int) {
 	return dav.Esc(v), http.StatusOK
 }
 
-func collectionProp(res *resource, name xml.Name) (string, int) {
+func (s *Server) collectionProp(res *resource, name xml.Name) (string, int) {
 	m := res.col.Meta()
+	if res.isShared() {
+		// The sharee's own name, color and order override the owner's.
+		p := s.store.SharePrefs(res.owner, res.col.Key())
+		dn := m.DisplayName
+		if dn == "" {
+			dn = res.col.Name
+		}
+		ownerName := s.cfg.Get().Users[res.col.Owner].Name
+		if ownerName == "" {
+			ownerName = res.col.Owner
+		}
+		m.DisplayName = dn + " (" + ownerName + ")"
+		if p.DisplayName != "" {
+			m.DisplayName = p.DisplayName
+		}
+		if p.Color != "" {
+			m.Color = p.Color
+		}
+		if p.Order != "" {
+			m.Order = p.Order
+		}
+	}
 	switch name {
 	case pDisplayName:
 		dn := m.DisplayName
@@ -218,10 +317,10 @@ func collectionProp(res *resource, name xml.Name) (string, int) {
 		}
 		return dav.Esc(dn), http.StatusOK
 	case pGetCTag:
-		return dav.Esc(strconv.FormatUint(res.col.SyncToken(), 10)), http.StatusOK
+		return dav.Esc(s.ctag(res)), http.StatusOK
 	case pSyncToken:
 		// Live but not part of allprop (RFC 6578 §4).
-		return dav.Esc(formatSyncToken(res.col.SyncID(), res.col.SyncToken())), http.StatusOK
+		return dav.Esc(s.syncToken(res, res.col.SyncToken())), http.StatusOK
 	}
 	if res.isCalendar() {
 		switch name {
@@ -331,7 +430,7 @@ var protectedProps = []xml.Name{
 	pGetETag, pSyncToken, pGetContentType, pGetContentLength, pGetLastModified, pSupportedCompSet,
 	pSupportedCalData, pCalMaxResourceSize, pGetCTag, pCalendarData, pPrincipalURL,
 	pCalendarHomeSet, pCalendarUserAddrSet, pAddressbookHomeSet, pSupportedAddrData,
-	pCardMaxResourceSize, pAddressData,
+	pCardMaxResourceSize, pAddressData, pGroupMemberSet, pGroupMembership,
 }
 
 // applyProp sets or removes one collection property on m. It returns an

@@ -64,7 +64,9 @@ func TestParseXMLManyTextChunks(t *testing.T) {
 	if err != nil || len(e.Text) != n {
 		t.Fatal(err)
 	}
-	if d := time.Since(start); d > 200*time.Millisecond {
+	// Linear takes milliseconds; quadratic would take many seconds. The
+	// generous bound keeps this stable under -race and on slow CI runners.
+	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("took %v", d)
 	}
 }

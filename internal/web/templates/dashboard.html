@@ -146,14 +146,19 @@
 {{end}}
 
 {{define "shared"}}{{$p := .P}}{{$c := .C}}
-<div class="col">
+<div class="col{{if $c.Hidden}} is-hidden{{end}}">
   <div class="col-head">
     {{if eq $c.Kind "calendars"}}{{if $c.Color}}<span class="dot" style="background:{{inputColor $c.Color}}"></span>{{else}}<span class="dot nocolor" title="No color set"></span>{{end}}{{end}}
     <span class="col-name">{{$c.DisplayName}}</span>
     <span class="badge">from {{$c.Owner}}</span>
     <span class="badge">{{if eq $c.Access "write"}}read-write{{else}}read-only{{end}}</span>
     {{template "counts" $c}}
-    {{if $c.Hidden}}<span class="badge">hidden</span>{{end}}
+    {{if $c.Hidden}}<span class="badge">hidden from your devices</span>{{end}}
+    <form method="post" action="{{$p.Prefix}}collections/hide" class="inline col-toggle">
+      <input type="hidden" name="csrf" value="{{$p.CSRF}}"><input type="hidden" name="key" value="{{$c.Key}}">
+      {{if $c.Hidden}}<input type="hidden" name="hidden" value="0"><button class="secondary small" type="submit" title="List it on your devices again">Show on devices</button>
+      {{else}}<input type="hidden" name="hidden" value="1"><button class="secondary small" type="submit" title="Remove it from your devices; nothing changes for the owner">Hide from devices</button>{{end}}
+    </form>
   </div>
   <div class="actions" data-actions>
   <details name="act-{{$c.Key}}"><summary>Your view</summary>
@@ -162,11 +167,6 @@
       <input type="text" name="displayname" value="{{$c.DisplayName}}" maxlength="100">
       {{if eq $c.Kind "calendars"}}{{template "cw" (inputColor $c.Color)}}{{end}}
       <button type="submit">Save</button>
-    </form>
-    <form method="post" action="{{$p.Prefix}}collections/hide" class="row">
-      <input type="hidden" name="csrf" value="{{$p.CSRF}}"><input type="hidden" name="key" value="{{$c.Key}}">
-      {{if $c.Hidden}}<input type="hidden" name="hidden" value="0"><button class="secondary" type="submit">Show on my devices</button>
-      {{else}}<input type="hidden" name="hidden" value="1"><button class="secondary" type="submit">Hide from my devices</button>{{end}}
     </form>
   </details>
   <details name="act-{{$c.Key}}"><summary>Export</summary>

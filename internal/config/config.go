@@ -51,7 +51,7 @@ type OIDC struct {
 
 type Config struct {
 	// DAVPrefix and UIPrefix are the URL paths the DAV tree and the web UI
-	// live under. Nothing is served at "/" itself. Changing them needs a
+	// live under. "/" itself only has a static landing page. Changing them needs a
 	// restart and breaks existing client accounts / bookmarks.
 	DAVPrefix string `yaml:"dav_prefix,omitempty"`
 	UIPrefix  string `yaml:"ui_prefix,omitempty"`

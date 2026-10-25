@@ -1,0 +1,14 @@
+{{define "landing.html"}}{{template "head"}}
+<main class="login">
+  <section>
+    <h2>ccdav</h2>
+    <p>This server keeps calendars, tasks and contacts and syncs them with your devices over CalDAV and CardDAV: phones, tablets, Thunderbird, Apple Calendar, DAVx⁵ and others.</p>
+    <p>To connect a device, add a CalDAV / CardDAV account with this server's address, <code>{{.Host}}</code>, your user name and an app password.</p>
+    <div class="row">
+      <a href="{{.UIPrefix}}">Sign in to manage your calendars, sharing and app passwords</a>
+    </div>
+  </section>
+  <p class="muted" style="text-align:center"><a href="https://github.com/chriss-de/go-ccdav">ccdav on GitHub</a></p>
+</main>
+</body></html>
+{{end}}

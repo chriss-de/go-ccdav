@@ -1,9 +1,9 @@
 # ccdav configuration. Lives in the data directory as config.yaml.
 # Reload without restart: kill -HUP <pid>  (or podman kill -s HUP <container>)
 
-# URL paths of the DAV tree and (from milestone 7) the web UI. Nothing is
-# served at "/" itself; only /.well-known/caldav|carddav (redirect to
-# dav_prefix) and /healthz live outside these. They must not overlap.
+# URL paths of the DAV tree and the web UI. Outside them there is only a
+# static landing page at "/", /.well-known/caldav|carddav (redirect to
+# dav_prefix) and /healthz. They must not overlap.
 # Changing them needs a restart and breaks existing client accounts.
 dav_prefix: /dav/
 ui_prefix: /ui/

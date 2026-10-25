@@ -65,7 +65,7 @@ image: ## build the container image
 
 image-run: image ## run the image with ./data mounted at /data
 	@test -f $(DATA)/config.yaml || { mkdir -p $(DATA); cp config.example.yaml $(DATA)/config.yaml; }
-	$(ENGINE) run --rm -it -p $(PORT):8080 -v $(DATA):/data:Z $(IMAGE):$(TAG)
+	$(ENGINE) run --rm -it -p $(PORT):8080 --userns keep-id -v $(DATA):/data:Z $(IMAGE):$(TAG)
 
 clean: ## remove build output
 	rm -rf bin

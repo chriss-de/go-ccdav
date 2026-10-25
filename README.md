@@ -47,7 +47,7 @@ make fuzz         # every fuzz target, FUZZTIME=30s each
 make vulncheck    # govulncheck: known vulnerabilities in what the code calls
 ```
 
-Point a client at `http://localhost:8080/`. Discovery goes through `/.well-known/caldav` or `/.well-known/carddav`, both of which redirect to the DAV prefix (`/dav/` by default). Apart from those, `/healthz` and the configured prefixes, every path returns 404, including `/`. Each user starts with one calendar, `Personal` (events, tasks and journal), and the address book `contacts`.
+Point a client at `http://localhost:8080/`. Discovery goes through `/.well-known/caldav` or `/.well-known/carddav`, both of which redirect to the DAV prefix (`/dav/` by default). Apart from those, `/healthz` and the configured prefixes, every path returns 404. The one exception is `GET /`, a small static page that explains what the server is and links to the web UI and the GitHub project. Each user starts with one calendar, `Personal` (events, tasks and journal), and the address book `contacts`.
 
 ## Configuration
 
@@ -135,6 +135,14 @@ server {
 ```
 
 Both forward `/.well-known/caldav` and `/.well-known/carddav` with everything else; ccdav answers them with a redirect to the DAV prefix. Don't strip the `Authorization` header.
+
+## CI
+
+GitHub Actions (`.github/workflows/`):
+
+- **`ci.yml`** runs on every push and pull request. It runs gofmt, vet, the tests with the race detector, and govulncheck, all on the latest Go 1.27 patch release. It then builds the image for `linux/amd64` and `linux/arm64`. Pushes to `master` publish the tags `edge` and `sha-<commit>`. A tag `v1.2.3` publishes `1.2.3`, `1.2`, `1` and `latest`. Pull requests only build. The workflow needs the secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (a Docker Hub access token with read and write access) and the variable `DOCKERHUB_REPOSITORY` (for example `chrissde/ccdav`).
+- **`fuzz.yml`** runs every fuzz target for 60 s each Monday, or on demand with a custom duration. Failing inputs are uploaded as an artifact.
+- **Dependabot** checks Go modules, Actions and base images weekly.
 
 ## Layout
 

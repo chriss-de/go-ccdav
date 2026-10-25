@@ -96,7 +96,7 @@ data/
 - Per-sharee name/color/order in `data/users/<u>/shared.json`; their version is appended to the sharee's CTag/sync token (`…-<n>.<v>`). Sharee DELETE on the collection hides it for them.
 - Read-only: `current-user-privilege-set` without `write-content`, writes → 403 `need-privileges`.
 - Group principals at `<prefix>principals/groups/<g>/` (`group-member-set`), `group-membership` on users.
-- `dav_prefix` / `ui_prefix` configurable; nothing at `/` except `/.well-known/*` and `/healthz`.
+- `dav_prefix` / `ui_prefix` configurable; outside the prefixes only `/.well-known/*`, `/healthz` and a static landing page at `GET /` (added 2026-10-25: what it is, link to the UI and GitHub).
 - Until the web UI: `ccdav share|unshare|shares`, applied by SIGHUP.
 
 ### Original notes

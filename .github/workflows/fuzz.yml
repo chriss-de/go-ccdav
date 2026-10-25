@@ -1,0 +1,34 @@
+# Runs every fuzz target for a while. A failing input is uploaded as an
+# artifact; drop it into the package's testdata/fuzz/<Target>/ to turn it
+# into a regression test.
+name: fuzz
+
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays 03:17 UTC
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: time per fuzz target
+        default: 60s
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          check-latest: true
+      - name: fuzz
+        run: make fuzz FUZZTIME=${{ inputs.fuzztime || '60s' }}
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: "**/testdata/fuzz/**"

@@ -107,7 +107,9 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	limiter := auth.NewLimiter() // shared: failed DAV and UI logins count together
-	mux.Handle(cfg.Get().UIPrefix, web.New(cfg, st, appPass, limiter, key, defaults, log))
+	ui := web.New(cfg, st, appPass, limiter, key, defaults, log)
+	mux.Handle(cfg.Get().UIPrefix, ui)
+	mux.HandleFunc("GET /{$}", ui.Landing) // exactly "/"; other methods (PROPFIND) fall through to DAV
 	var dav http.Handler = server.New(cfg, st, appPass, limiter, log)
 	if *traceDir != "" {
 		if dav, err = trace.Handler(*traceDir, dav, log); err != nil {
@@ -115,7 +117,7 @@ func run() error {
 		}
 		log.Warn("tracing DAV requests; the files contain calendar and contact data", "dir", *traceDir)
 	}
-	mux.Handle("/", dav) // DAV prefix, well-known; 404 otherwise
+	mux.Handle("/", dav) // DAV prefix, well-known; 404 for anything else
 
 	srv := &http.Server{
 		Addr:              *listen,

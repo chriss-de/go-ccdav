@@ -68,11 +68,27 @@ func New(cfg *config.Store, st *store.Store, ap *auth.AppPasswords, lim *auth.Li
 	}
 }
 
-func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h := w.Header()
+func securityHeaders(h http.Header) {
 	h.Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "same-origin")
+}
+
+// Landing serves the static page at "/": what this is, a link to the UI
+// and to the project. Register it for exactly "/" ("GET /{$}").
+func (u *UI) Landing(w http.ResponseWriter, r *http.Request) {
+	securityHeaders(w.Header())
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	host := r.Host
+	if b := u.cfg.Get().BaseURL; b != "" {
+		host = strings.TrimPrefix(strings.TrimPrefix(b, "https://"), "http://")
+	}
+	u.render(w, http.StatusOK, "landing.html", map[string]any{"UIPrefix": u.prefix, "Host": host})
+}
+
+func (u *UI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h := w.Header()
+	securityHeaders(h)
 	h.Set("Cache-Control", "no-store")
 
 	path := strings.TrimPrefix(r.URL.Path, u.prefix)

@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           # Latest patch release (stdlib security fixes); go.mod only sets
           # the minimum. Keep the minor in step with go.mod.

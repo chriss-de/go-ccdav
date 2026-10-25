@@ -1,5 +1,5 @@
 // Package config loads the server configuration (users, groups, SMTP and
-// RSVP settings) from config.yaml in the data directory. config.json is
+// RSVP settings) from config.yaml, by default in the data directory. config.json is
 // accepted too: YAML is a superset of JSON. The live config is swapped
 // atomically on Reload (SIGHUP).
 package config
@@ -55,6 +55,10 @@ type Config struct {
 	// restart and breaks existing client accounts / bookmarks.
 	DAVPrefix string `yaml:"dav_prefix,omitempty"`
 	UIPrefix  string `yaml:"ui_prefix,omitempty"`
+	// DataDir holds collections, session.key and app passwords. Load makes
+	// a relative path relative to the config file and defaults it to the
+	// file's directory. Changing it needs a restart.
+	DataDir string `yaml:"data_dir,omitempty"`
 	// BaseURL is the public URL behind the reverse proxy, used for links in
 	// emails (RSVP). DAV hrefs are host-relative and don't need it.
 	BaseURL string              `yaml:"base_url,omitempty"`
@@ -135,6 +139,9 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	c.BaseURL = strings.TrimSuffix(c.BaseURL, "/")
+	if !filepath.IsAbs(c.DataDir) {
+		c.DataDir = filepath.Join(filepath.Dir(path), c.DataDir)
+	}
 	if c.Trusted, err = clientip.ParsePrefixes(c.TrustedProxies); err != nil {
 		return nil, fmt.Errorf("%s: trusted_proxies: %w", path, err)
 	}
@@ -183,15 +190,15 @@ func NewStore(path string) (*Store, error) {
 	return s, s.Reload()
 }
 
-// Reload re-reads the file. A changed dav_prefix or ui_prefix is rejected
-// (the old config stays active) because those need a restart.
+// Reload re-reads the file. A changed dav_prefix, ui_prefix or data_dir is
+// rejected (the old config stays active) because those need a restart.
 func (s *Store) Reload() error {
 	c, err := Load(s.path)
 	if err != nil {
 		return err
 	}
-	if old := s.cur.Load(); old != nil && (old.DAVPrefix != c.DAVPrefix || old.UIPrefix != c.UIPrefix) {
-		return fmt.Errorf("%s: changing dav_prefix or ui_prefix requires a restart", s.path)
+	if old := s.cur.Load(); old != nil && (old.DAVPrefix != c.DAVPrefix || old.UIPrefix != c.UIPrefix || old.DataDir != c.DataDir) {
+		return fmt.Errorf("%s: changing dav_prefix, ui_prefix or data_dir requires a restart", s.path)
 	}
 	s.cur.Store(c)
 	return nil

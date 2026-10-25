@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/ccdav /usr/local/bin/ccdav
-ENV CCDAV_DATA=/data CCDAV_LISTEN=:8080 CCDAV_LOG=json
+ENV CCDAV_CONFIG=/data/config.yaml CCDAV_LISTEN=:8080 CCDAV_LOG=json
 VOLUME /data
 EXPOSE 8080
 USER nonroot:nonroot

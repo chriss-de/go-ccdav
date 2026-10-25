@@ -95,6 +95,32 @@ func TestPrefixes(t *testing.T) {
 	}
 }
 
+func TestDataDir(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct{ body, want string }{
+		{"", dir},
+		{"data_dir: store\n", filepath.Join(dir, "store")},
+		{"data_dir: ../store\n", filepath.Join(filepath.Dir(dir), "store")},
+		{"data_dir: /var/lib/ccdav\n", "/var/lib/ccdav"},
+	} {
+		c, err := Load(write(t, dir, "config.yaml", tc.body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.DataDir != tc.want {
+			t.Errorf("%q: DataDir = %q, want %q", tc.body, c.DataDir, tc.want)
+		}
+	}
+	st, err := NewStore(write(t, dir, "config.yaml", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, dir, "config.yaml", "data_dir: elsewhere\n")
+	if err := st.Reload(); err == nil || st.Get().DataDir != dir {
+		t.Fatal("data_dir change on reload must be rejected", err)
+	}
+}
+
 func TestGroupsOf(t *testing.T) {
 	c := &Config{Groups: map[string][]string{"b": {"alice"}, "a": {"alice", "bob"}, "c": {"bob"}}}
 	if got := c.GroupsOf("alice"); !slices.Equal(got, []string{"a", "b"}) {

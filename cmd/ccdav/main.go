@@ -1,12 +1,14 @@
 // Command ccdav is a small self-hosted CalDAV server backed by plain files.
 //
-//	ccdav [-data DIR] [-listen ADDR]   run the server
+//	ccdav [-config FILE] [-data DIR] [-listen ADDR]   run the server
 //	ccdav hash-password                read a password from stdin, print its hash
 //	ccdav healthcheck [-listen ADDR]   exit 0 if the local server answers /healthz
 //	ccdav share | unshare | shares     manage sharing (see "ccdav share -h")
 //
-// The config is read from config.yaml (or config.yml / config.json) in the
-// data directory. TLS is expected to be terminated by a reverse proxy.
+// The config is read from -config, or from config.yaml (or config.yml /
+// config.json) in the -data directory. The data directory is -data, else
+// data_dir from the config, else the config file's directory. TLS is
+// expected to be terminated by a reverse proxy.
 package main
 
 import (
@@ -65,8 +67,29 @@ func env(key, def string) string {
 	return def
 }
 
+// locate returns the config file: cfgFile if set, else the one found in
+// the data directory (default "data").
+func locate(data, cfgFile string) (string, error) {
+	if cfgFile != "" {
+		return cfgFile, nil
+	}
+	if data == "" {
+		data = "data"
+	}
+	return config.Find(data)
+}
+
+// dataDirOf returns data if set, else the config's data_dir.
+func dataDirOf(data string, c *config.Config) string {
+	if data != "" {
+		return data
+	}
+	return c.DataDir
+}
+
 func run() error {
-	dataDir := flag.String("data", env("DATA", "data"), "data directory (holds config.yaml)")
+	cfgFlag := flag.String("config", env("CONFIG", ""), "config file (default: config.yaml in the data directory)")
+	dataFlag := flag.String("data", env("DATA", ""), "data directory (default: data_dir from the config, else the config file's directory)")
 	listen := flag.String("listen", env("LISTEN", ":8080"), "listen address")
 	logFormat := flag.String("log", env("LOG", "text"), "log format: text or json")
 	traceDir := flag.String("trace", env("TRACE", ""), "record every DAV request and response into this directory (debugging; contains calendar data)")
@@ -78,7 +101,7 @@ func run() error {
 	}
 	log := slog.New(h)
 
-	cfgPath, err := config.Find(*dataDir)
+	cfgPath, err := locate(*dataFlag, *cfgFlag)
 	if err != nil {
 		return err
 	}
@@ -86,7 +109,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	st := store.New(*dataDir, server.UIDOf)
+	dataDir := dataDirOf(*dataFlag, cfg.Get())
+	st := store.New(dataDir, server.UIDOf)
 	// Load everything up front: listing a user's home must know about
 	// collections other users shared with them.
 	if err := st.LoadAll(); err != nil {
@@ -95,11 +119,11 @@ func run() error {
 	if err := directory.Sync(cfg.Get(), st, server.DefaultAddressBooks); err != nil {
 		log.Error("directory address books", "err", err)
 	}
-	key, err := web.LoadOrCreateKey(filepath.Join(*dataDir, "session.key"))
+	key, err := web.LoadOrCreateKey(filepath.Join(dataDir, "session.key"))
 	if err != nil {
 		return err
 	}
-	appPass := auth.NewAppPasswords(*dataDir)
+	appPass := auth.NewAppPasswords(dataDir)
 	defaults := map[store.Kind]map[string]store.Meta{
 		store.Calendars:    server.DefaultCalendars,
 		store.AddressBooks: server.DefaultAddressBooks,
@@ -152,7 +176,7 @@ func run() error {
 
 	errc := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", *listen, "data", *dataDir, "config", cfgPath,
+		log.Info("listening", "addr", *listen, "data", dataDir, "config", cfgPath,
 			"dav_prefix", cfg.Get().DAVPrefix, "ui_prefix", cfg.Get().UIPrefix, "version", version)
 		errc <- srv.ListenAndServe()
 	}()

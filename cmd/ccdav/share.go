@@ -13,9 +13,9 @@ import (
 )
 
 const shareUsage = `usage:
-  ccdav share   [-data DIR] <owner>/<calendars|addressbooks>/<name> user:<u>|group:<g> read|write
-  ccdav unshare [-data DIR] <owner>/<calendars|addressbooks>/<name> user:<u>|group:<g>
-  ccdav shares  [-data DIR] [owner]
+  ccdav share   [-config FILE] [-data DIR] <owner>/<calendars|addressbooks>/<name> user:<u>|group:<g> read|write
+  ccdav unshare [-config FILE] [-data DIR] <owner>/<calendars|addressbooks>/<name> user:<u>|group:<g>
+  ccdav shares  [-config FILE] [-data DIR] [owner]
 
 Changes are written to the collection's .meta.json. A running server picks
 them up on SIGHUP (kill -HUP <pid>, podman kill -s HUP <container>).
@@ -23,12 +23,13 @@ them up on SIGHUP (kill -HUP <pid>, podman kill -s HUP <container>).
 
 func shareCmd(cmd string, args []string) int {
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
-	dataDir := fs.String("data", env("DATA", "data"), "data directory")
+	cfgFile := fs.String("config", env("CONFIG", ""), "config file")
+	dataDir := fs.String("data", env("DATA", ""), "data directory")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, shareUsage) }
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if err := runShare(cmd, *dataDir, fs.Args()); err != nil {
+	if err := runShare(cmd, *dataDir, *cfgFile, fs.Args()); err != nil {
 		fmt.Fprintln(os.Stderr, "ccdav:", err)
 		if strings.HasPrefix(err.Error(), "usage") {
 			fmt.Fprint(os.Stderr, shareUsage)
@@ -38,8 +39,8 @@ func shareCmd(cmd string, args []string) int {
 	return 0
 }
 
-func runShare(cmd, dataDir string, args []string) error {
-	cfgPath, err := config.Find(dataDir)
+func runShare(cmd, data, cfgFile string, args []string) error {
+	cfgPath, err := locate(data, cfgFile)
 	if err != nil {
 		return err
 	}
@@ -47,7 +48,7 @@ func runShare(cmd, dataDir string, args []string) error {
 	if err != nil {
 		return err
 	}
-	st := store.New(dataDir, server.UIDOf)
+	st := store.New(dataDirOf(data, cfg), server.UIDOf)
 
 	if cmd == "shares" {
 		if len(args) > 1 {

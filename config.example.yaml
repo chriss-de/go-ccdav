@@ -1,5 +1,11 @@
-# ccdav configuration. Lives in the data directory as config.yaml.
+# ccdav configuration. Found as config.yaml in the data directory, or
+# anywhere with -config FILE / CCDAV_CONFIG.
 # Reload without restart: kill -HUP <pid>  (or podman kill -s HUP <container>)
+
+# Where collections, session.key and app passwords live. A relative path is
+# relative to this file. Default: this file's directory. -data / CCDAV_DATA
+# override it. Changing it needs a restart.
+# data_dir: /var/lib/ccdav
 
 # URL paths of the DAV tree and the web UI. Outside them there is only a
 # static landing page at "/", /.well-known/caldav|carddav (redirect to

@@ -51,7 +51,7 @@ Point a client at `http://localhost:8080/`. Discovery goes through `/.well-known
 
 ## Configuration
 
-Settings come from `config.yaml` in the data directory (`config.yml` and `config.json` are found too, in that order). See [`config.example.yaml`](config.example.yaml). Unknown keys are rejected, so typos fail loudly. Send the process `SIGHUP` to reload the file.
+Settings come from `config.yaml` in the data directory (`config.yml` and `config.json` are found too, in that order), or from the file given with `-config`. The data directory is `-data` if set, else `data_dir` from the config, else the config file's directory. See [`config.example.yaml`](config.example.yaml). Unknown keys are rejected, so typos fail loudly. Send the process `SIGHUP` to reload the file.
 
 ```yaml
 base_url: https://dav.example.com
@@ -83,7 +83,8 @@ To create a password hash, run `make hash-password` or `ccdav hash-password`. Bo
 
 | Flag | Env | Default |
 |---|---|---|
-| `-data` | `CCDAV_DATA` | `data` |
+| `-config FILE` | `CCDAV_CONFIG` | `config.yaml` in the data directory |
+| `-data` | `CCDAV_DATA` | `data_dir` from the config, else the config's directory; without `-config`, `data` |
 | `-listen` | `CCDAV_LISTEN` | `:8080` |
 | `-log` (`text`/`json`) | `CCDAV_LOG` | `text` |
 | `-trace DIR` | `CCDAV_TRACE` | off |

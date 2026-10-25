@@ -99,9 +99,14 @@ The old `DAVD_*` names still work.
 ```sh
 make image                      # ENGINE=podman by default; ENGINE=docker works too
 make image-run                  # mounts ./data at /data, port 8080
+make image-login   REGISTRY=registry.example.com/me             # logs in to registry.example.com
+make image image-push REGISTRY=registry.example.com/me TAG=231  # → registry.example.com/me/ccdav:231
+make image-release REGISTRY=registry.example.com/me TAG=231     # build, push :231 and :latest
 ```
 
-The image uses distroless `static:nonroot`, keeps its data in the `/data` volume and has a `HEALTHCHECK` that runs `ccdav healthcheck`.
+`REGISTRY` is a prefix for the image name; `IMAGE=` replaces the whole name, and `TAG` defaults to `git describe`.
+
+The image uses distroless `static:nonroot` and keeps its data in the `/data` volume. It has no shell or curl; for a liveness probe, run `ccdav healthcheck` (exits 0 if `/healthz` answers), e.g. as an exec probe in Kubernetes or compose.
 
 ### Behind a reverse proxy
 

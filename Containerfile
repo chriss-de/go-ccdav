@@ -17,5 +17,4 @@ ENV CCDAV_DATA=/data CCDAV_LISTEN=:8080 CCDAV_LOG=json
 VOLUME /data
 EXPOSE 8080
 USER nonroot:nonroot
-HEALTHCHECK --interval=30s --timeout=5s CMD ["/usr/local/bin/ccdav", "healthcheck"]
 ENTRYPOINT ["/usr/local/bin/ccdav"]

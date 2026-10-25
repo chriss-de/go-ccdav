@@ -4,7 +4,9 @@ VERSION  ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev
 LDFLAGS  := -s -w -X main.version=$(VERSION)
 
 ENGINE   ?= podman
-IMAGE    ?= ccdav
+REGISTRY ?=
+# Full image name; REGISTRY is a prefix: make image REGISTRY=registry.example.com/me TAG=231
+IMAGE    ?= $(if $(REGISTRY),$(patsubst %/,%,$(REGISTRY))/ccdav,ccdav)
 TAG      ?= $(VERSION)
 DATA     ?= $(CURDIR)/data
 PORT     ?= 8080
@@ -14,7 +16,7 @@ GO       ?= go
 export CGO_ENABLED := 0
 
 .PHONY: all build test race vet vulncheck fmt fmt-check check fuzz run clean \
-        image image-run hash-password help
+        image image-push image-release image-login image-run hash-password help need-registry
 
 all: check build
 
@@ -60,8 +62,18 @@ run: build ## run locally against ./data
 hash-password: build ## hash a password for config.yaml
 	@./bin/$(BINARY) hash-password
 
-image: ## build the container image
+image: ## build the image, tagged TAG and latest (set REGISTRY=, IMAGE=, TAG=)
 	$(ENGINE) build -f Containerfile --build-arg VERSION=$(VERSION) -t $(IMAGE):$(TAG) -t $(IMAGE):latest .
+
+image-push: need-registry ## push IMAGE:TAG (build it first with make image)
+	$(ENGINE) push $(IMAGE):$(TAG)
+
+image-release: need-registry image ## build, push TAG and move latest along
+	$(ENGINE) push $(IMAGE):$(TAG)
+	$(ENGINE) push $(IMAGE):latest
+
+image-login: need-registry ## log in to REGISTRY's host
+	$(ENGINE) login $(firstword $(subst /, ,$(REGISTRY)))
 
 image-run: image ## run the image with ./data mounted at /data
 	@test -f $(DATA)/config.yaml || { mkdir -p $(DATA); cp config.example.yaml $(DATA)/config.yaml; }
@@ -69,3 +81,6 @@ image-run: image ## run the image with ./data mounted at /data
 
 clean: ## remove build output
 	rm -rf bin
+
+need-registry:
+	@test -n "$(REGISTRY)" || { echo "set REGISTRY=host/path, e.g. make image-push REGISTRY=registry.example.com/me"; exit 1; }

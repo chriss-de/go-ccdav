@@ -14,6 +14,11 @@
 dav_prefix: /dav/
 ui_prefix: /ui/
 
+# JMAP (work in progress: core protocol only, no contacts or calendars
+# yet). Served under jmap_prefix and /.well-known/jmap. Needs a restart.
+# jmap: true
+# jmap_prefix: /jmap/
+
 # Reverse proxies (CIDRs or addresses) whose X-Forwarded-For is trusted.
 # The real client IP is logged and used for login rate limiting
 # (10 failures per IP and user, 50 per IP, within 15 minutes). Leave empty

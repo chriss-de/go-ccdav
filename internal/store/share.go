@@ -84,7 +84,7 @@ func (c *Collection) SetShares(shares []Share) error {
 		return err
 	}
 	c.meta = m
-	return nil
+	return c.acct.noteCollection(c)
 }
 
 // refreshMeta re-reads .meta.json; the caller holds the write lock.
@@ -143,7 +143,8 @@ func (s *Store) All() []*Collection {
 }
 
 // ReloadMeta re-reads .meta.json of all loaded collections (after the CLI
-// changed shares) and loads collections created since startup.
+// changed shares), loads collections created since startup and, when
+// tracking accounts, reconciles the account logs.
 func (s *Store) ReloadMeta() error {
 	if err := s.LoadAll(); err != nil {
 		return err
@@ -156,6 +157,7 @@ func (s *Store) ReloadMeta() error {
 		}
 		c.mu.Unlock()
 	}
+	errs = append(errs, s.Reconcile())
 	return errors.Join(errs...)
 }
 

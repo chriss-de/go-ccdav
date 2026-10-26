@@ -30,6 +30,8 @@ Not implemented yet: scheduling/iMIP and RSVP links. The design is in [`ccdav-de
 | [6868](https://www.rfc-editor.org/rfc/rfc6868) | Parameter value encoding | |
 | [7636](https://www.rfc-editor.org/rfc/rfc7636) | PKCE | OIDC login of the web UI |
 
+**JMAP:** in progress, off by default (`jmap: true`). The [core protocol](https://www.rfc-editor.org/rfc/rfc8620) works: session, API requests with result references, and blob upload/download. Data types are still missing; [Contacts](https://www.rfc-editor.org/rfc/rfc9610) comes next, then [Calendars](https://datatracker.ietf.org/doc/draft-ietf-jmap-calendars/). Push is not implemented yet. App passwords work for JMAP as they do for DAV.
+
 ## Quick start
 
 ```sh
@@ -61,6 +63,8 @@ Unknown keys are rejected. `SIGHUP` reloads the file. See [`config.example.yaml`
 | `data_dir` | the config's directory | collections, `session.key`, app passwords; relative to the config file; restart required |
 | `dav_prefix` | `/dav/` | URL path of the DAV tree; restart required |
 | `ui_prefix` | `/ui/` | URL path of the web UI; must not overlap `dav_prefix`; restart required |
+| `jmap` | `false` | serve JMAP under `jmap_prefix` and `/.well-known/jmap`; restart required |
+| `jmap_prefix` | `/jmap/` | URL path of the JMAP API; must not overlap the other prefixes; restart required |
 | `base_url` | | public URL, e.g. `https://dav.example.com`; needed for OIDC |
 | `trusted_proxies` | | CIDRs or addresses whose `X-Forwarded-*` headers are trusted |
 | `users.<name>.password` | | hash from `ccdav hash-password`; fallback for DAV, and UI login without OIDC |

@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"time"
 
@@ -36,19 +35,17 @@ import (
 const maxResourceSize = 10 << 20
 
 type Server struct {
-	prefix  string // DAV prefix, fixed for the server's lifetime
-	cfg     *config.Store
-	store   *store.Store
-	auth    *auth.Cache
-	appPass *auth.AppPasswords
-	limit   *auth.Limiter
-	log     *slog.Logger
+	prefix string // DAV prefix, fixed for the server's lifetime
+	cfg    *config.Store
+	store  *store.Store
+	basic  *auth.Basic
+	log    *slog.Logger
 }
 
 // New creates the DAV handler. ap and lim are shared with the web UI.
 func New(cfg *config.Store, st *store.Store, ap *auth.AppPasswords, lim *auth.Limiter, log *slog.Logger) *Server {
-	return &Server{prefix: cfg.Get().DAVPrefix, cfg: cfg, store: st, auth: auth.NewCache(15 * time.Minute),
-		appPass: ap, limit: lim, log: log}
+	return &Server{prefix: cfg.Get().DAVPrefix, cfg: cfg, store: st,
+		basic: auth.NewBasic(cfg.Password, ap, lim, log, "dav"), log: log}
 }
 
 // DefaultCalendars are created in a user's calendar home on first access:
@@ -117,26 +114,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, ip string) (user 
 		s.options(w)
 		return ""
 	}
-	name, _, hasAuth := r.BasicAuth()
-	if hasAuth {
-		if ok, wait := s.limit.Allow(ip, name); !ok {
-			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())))
-			http.Error(w, "too many failed logins, try again later", http.StatusTooManyRequests)
-			return ""
-		}
-	}
-	user, ok := s.authenticate(r)
+	user, ok := s.basic.Authenticate(w, r, ip)
 	if !ok {
-		// Clients first ask without credentials; only wrong ones count.
-		if hasAuth {
-			s.limit.Fail(ip, name)
-			s.log.Warn("dav login failed", "user", name, "ip", ip)
-		}
-		w.Header().Set("WWW-Authenticate", `Basic realm="ccdav", charset="UTF-8"`)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return ""
 	}
-	s.limit.Success(ip, user)
 	r.Body = http.MaxBytesReader(w, r.Body, maxResourceSize)
 	res, err := s.resolve(p, user)
 	if err != nil {
@@ -173,27 +154,6 @@ func (s *Server) options(w http.ResponseWriter) {
 	w.Header().Set("Allow", allowed)
 	w.Header().Set("DAV", "1, 3, calendar-access, addressbook, extended-mkcol")
 	w.WriteHeader(http.StatusOK)
-}
-
-func (s *Server) authenticate(r *http.Request) (string, bool) {
-	name, pw, ok := r.BasicAuth()
-	if !ok {
-		return "", false
-	}
-	u, ok := s.cfg.Get().Users[name]
-	if ok && s.appPass.Verify(name, pw) {
-		return name, true
-	}
-	if !ok || u.Password == "" {
-		// Burn comparable time so user enumeration via timing is harder.
-		auth.Verify("pbkdf2-sha256$600000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", pw)
-		return "", false
-	}
-	// The config.yaml password stays as a fallback.
-	if !s.auth.Verify(name, u.Password, pw) {
-		return "", false
-	}
-	return name, true
 }
 
 type httpErr struct {

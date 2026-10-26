@@ -11,6 +11,7 @@ import (
 	"github.com/chriss-de/go-ccdav/internal/caldav"
 	"github.com/chriss-de/go-ccdav/internal/ical"
 	"github.com/chriss-de/go-ccdav/internal/jscalendar"
+	"github.com/chriss-de/go-ccdav/internal/peruser"
 	"github.com/chriss-de/go-ccdav/internal/store"
 )
 
@@ -187,7 +188,7 @@ func (c *Call) updateEvent(v *View, id string, raw json.RawMessage) (map[string]
 		return nil, failSet(SetNotFound, "unknown creation id")
 	}
 	base, rid, isInstance := splitInstance(real)
-	var perUser *overlayData
+	var perUser *peruser.Data
 	res, err := c.writeEvent(v, base, func(owner map[string]any) (map[string]any, error) {
 		if !v.hasOverlay() {
 			return patchEvent(owner, patch, isInstance, rid)
@@ -195,25 +196,21 @@ func (c *Call) updateEvent(v *View, id string, raw json.RawMessage) (map[string]
 		// Someone else's calendar: the patch applies to the caller's view,
 		// their per-user values go into their overlay, the rest into the
 		// calendar object.
-		next, err := patchEvent(copyJSON(applyOverlay(owner, v.overlayOf(base))), patch, isInstance, rid)
+		next, err := patchEvent(copyJSON(peruser.Apply(owner, v.overlayOf(base))), patch, isInstance, rid)
 		if err != nil {
 			return nil, err
 		}
 		if paths := jscalendar.Validate(next); len(paths) > 0 {
 			return nil, &jscalendar.InvalidError{Paths: paths}
 		}
-		file, d := splitPerUser(next, owner)
+		file, d := peruser.Split(next, owner)
 		perUser = &d
 		return file, nil
 	}, isInstance, rid)
 	if err != nil || perUser == nil {
 		return res, err
 	}
-	var data json.RawMessage
-	if !perUser.empty() {
-		data, _ = json.Marshal(perUser)
-	}
-	if err := c.h.store.SetOverlay(c.User, v.Owner, base, data); err != nil {
+	if err := c.h.store.SetOverlay(c.User, v.Owner, base, peruser.Encode(*perUser)); err != nil {
 		return nil, err
 	}
 	v.overlay = nil // reload: the new state must count this change

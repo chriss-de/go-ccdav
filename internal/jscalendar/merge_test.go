@@ -313,3 +313,42 @@ func TestMergeSequence(t *testing.T) {
 		t.Fatalf("moved event not bumped:\n%s", out.Bytes())
 	}
 }
+
+func TestAppleAlarmLinesSurvive(t *testing.T) {
+	raw := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:x\r\nDTSTART;TZID=Europe/Berlin:20261103T100000\r\nSUMMARY:S\r\n" +
+		"BEGIN:VALARM\r\nX-WR-ALARMUID:ABC-123\r\nUID:ABC-123\r\nTRIGGER:-PT15M\r\nACTION:DISPLAY\r\nDESCRIPTION:Reminder\r\nX-APPLE-DEFAULT-ALARM:TRUE\r\nEND:VALARM\r\n" +
+		"END:VEVENT\r\nEND:VCALENDAR\r\n"
+	prev, _ := ical.ParseBytes([]byte(raw))
+	ev, _ := FromICal(prev)
+	e := normalize(ev)
+	// Acknowledge the alarm: the VALARM is written anew.
+	for _, a := range e["alerts"].(map[string]any) {
+		a.(map[string]any)["acknowledged"] = "2026-11-03T09:46:00Z"
+	}
+	out, _, err := Merge(prev, e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out.Bytes())
+	for _, want := range []string{"X-WR-ALARMUID:ABC-123", "X-APPLE-DEFAULT-ALARM:TRUE", "ACKNOWLEDGED:20261103T094600Z"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestRenderIsStable(t *testing.T) {
+	prev := parseFile(t, "testdata/meeting.ics")
+	ev, _ := FromICal(prev)
+	e := normalize(ev)
+	e["color"] = "green"
+	a, err1 := Render(prev, e)
+	b, err2 := Render(prev, e)
+	if err1 != nil || err2 != nil || string(a.Bytes()) != string(b.Bytes()) {
+		t.Fatal("two renders differ", err1, err2)
+	}
+	got := string(a.Bytes())
+	if !strings.Contains(got, "COLOR:green") || !strings.Contains(got, "DTSTAMP:20261021T090000Z") || !strings.Contains(got, "SEQUENCE:2") {
+		t.Fatalf("render touched more than the color:\n%s", got)
+	}
+}

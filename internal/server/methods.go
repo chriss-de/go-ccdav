@@ -299,17 +299,18 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request, res *resource) {
 		http.NotFound(w, r)
 		return
 	}
-	data, info, err := res.col.Get(res.name)
+	data, info, err := s.objectData(res)
 	if err != nil {
 		s.httpError(w, err)
 		return
 	}
+	etag := s.etagOf(res)
 	h := w.Header()
 	h.Set("Content-Type", kinds[res.sk].contentType)
-	h.Set("ETag", info.ETag)
+	h.Set("ETag", etag)
 	h.Set("Last-Modified", info.ModTime.Format(http.TimeFormat))
 	h.Set("Content-Length", strconv.Itoa(len(data)))
-	if inm := r.Header.Get("If-None-Match"); inm != "" && etagMatch(info.ETag, inm) {
+	if inm := r.Header.Get("If-None-Match"); inm != "" && etagMatch(etag, inm) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -346,7 +347,9 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, res *resource) {
 		badRequest(w, "invalid resource name")
 		return
 	}
-	if res.acc < accWrite {
+	// In a calendar someone else owns, per-user changes need only read
+	// access (putPerUser checks the rest).
+	if res.acc < accWrite && !s.perUserApplies(res) {
 		needPrivileges(w)
 		return
 	}
@@ -369,6 +372,10 @@ func (s *Server) put(w http.ResponseWriter, r *http.Request, res *resource) {
 	}
 	if pre, err := validate(res, data); err != nil {
 		dav.WriteError(w, http.StatusForbidden, dav.N(ns, pre), err.Error())
+		return
+	}
+	if s.perUserApplies(res) {
+		s.putPerUser(w, r, res, data)
 		return
 	}
 	info, created, err := res.col.Put(res.name, data, conds(r))

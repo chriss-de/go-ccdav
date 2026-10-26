@@ -166,7 +166,7 @@ func (s *Server) propValue(user string, res *resource, name xml.Name, req *dav.E
 		}
 	case kObject:
 		if res.exists {
-			return objectProp(res, name, req)
+			return s.objectProp(res, name, req)
 		}
 	}
 	return "", http.StatusNotFound
@@ -271,6 +271,9 @@ func (s *Server) ctag(res *resource) string {
 	if res.isShared() {
 		t += "." + strconv.FormatUint(s.store.SharePrefs(res.owner, res.col.Key()).Version, 10)
 	}
+	if v := s.overlayVersion(res); v >= 0 {
+		t += "." + strconv.FormatInt(v, 10) // their own alarms etc. (caldav_per_user)
+	}
 	return t
 }
 
@@ -278,6 +281,9 @@ func (s *Server) syncToken(res *resource, n uint64) string {
 	t := formatSyncToken(res.col.SyncID(), n)
 	if res.isShared() {
 		t += "." + strconv.FormatUint(s.store.SharePrefs(res.owner, res.col.Key()).Version, 10)
+	}
+	if v := s.overlayVersion(res); v >= 0 {
+		t += "." + strconv.FormatInt(v, 10)
 	}
 	return t
 }
@@ -368,13 +374,18 @@ func (s *Server) collectionProp(res *resource, name xml.Name) (string, int) {
 	return "", http.StatusNotFound
 }
 
-func objectProp(res *resource, name xml.Name, req *dav.Element) (string, int) {
+func (s *Server) objectProp(res *resource, name xml.Name, req *dav.Element) (string, int) {
 	switch name {
 	case pGetETag:
-		return dav.Esc(res.info.ETag), http.StatusOK
+		return dav.Esc(s.etagOf(res)), http.StatusOK
 	case pGetContentType:
 		return kinds[res.sk].contentType, http.StatusOK
 	case pGetContentLength:
+		if uv, ok := s.userViewOf(res); ok && !uv.data.Empty() {
+			if data, _, err := s.objectData(res); err == nil {
+				return strconv.Itoa(len(data)), http.StatusOK
+			}
+		}
 		return strconv.FormatInt(res.info.Size, 10), http.StatusOK
 	case pGetLastModified:
 		return res.info.ModTime.Format(http.TimeFormat), http.StatusOK
@@ -382,7 +393,7 @@ func objectProp(res *resource, name xml.Name, req *dav.Element) (string, int) {
 		if (name == pCalendarData) != res.isCalendar() {
 			return "", http.StatusNotFound
 		}
-		data, _, err := res.col.Get(res.name)
+		data, _, err := s.objectData(res)
 		if err != nil {
 			return "", http.StatusNotFound
 		}

@@ -780,6 +780,20 @@ func alerts(ev *ical.Component, e map[string]any, meta *eventMeta) {
 			}
 			setKey(ro, "relation", rel)
 		}
+		// Lines JSCalendar has no place for (DESCRIPTION, Apple's
+		// X-WR-ALARMUID and X-APPLE-DEFAULT-ALARM, ...) stay with the alert.
+		var rest []any
+		for _, p := range va.Props {
+			switch p.Name {
+			// DESCRIPTION and SUMMARY are written from the title.
+			case "UID", "ACTION", "TRIGGER", "ACKNOWLEDGED", "RELATED-TO", "DESCRIPTION", "SUMMARY":
+			default:
+				rest = append(rest, jcal(p))
+			}
+		}
+		if len(rest) > 0 {
+			obj["iCalProps"] = rest
+		}
 		// The id: the VALARM's UID (RFC 9074) if usable, else positional.
 		meta.alarmID[va] = entryWithID(e, "alerts", "a", va.Value("UID"), obj)
 	}

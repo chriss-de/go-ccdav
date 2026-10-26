@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chriss-de/go-ccdav/internal/peruser"
 	"github.com/chriss-de/go-ccdav/internal/store"
 )
 
@@ -65,7 +66,7 @@ type entry struct {
 func (h *Handler) load(t *typeDef, v *View, ref store.ObjectRef) (*entry, bool) {
 	e, ok := h.loadRaw(t, v, ref)
 	if ok && v.hasOverlay() {
-		e.obj = applyOverlay(e.obj, v.overlayOf(ref.ID))
+		e.obj = peruser.Apply(e.obj, v.overlayOf(ref.ID))
 	}
 	return e, ok
 }

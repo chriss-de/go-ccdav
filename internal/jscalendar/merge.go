@@ -40,6 +40,19 @@ var timingProps = []string{"start", "timeZone", "endTimeZone", "duration", "show
 // goes into JSPROP lines, which the conversion reads back. Missing
 // VTIMEZONEs are generated.
 func Merge(prev *ical.Component, event map[string]any) (out *ical.Component, changed bool, err error) {
+	return mergeEvent(prev, event, true)
+}
+
+// Render is Merge for showing an event a different way (one user's view
+// of it): nothing is stamped, so the same input gives the same bytes.
+func Render(prev *ical.Component, event map[string]any) (*ical.Component, error) {
+	out, _, err := mergeEvent(prev, event, false)
+	return out, err
+}
+
+// mergeEvent is Merge; stamp sets DTSTAMP/LAST-MODIFIED/CREATED and
+// bumps SEQUENCE.
+func mergeEvent(prev *ical.Component, event map[string]any, stamp bool) (out *ical.Component, changed bool, err error) {
 	if paths := Validate(event); len(paths) > 0 {
 		return nil, false, &InvalidError{Paths: paths}
 	}
@@ -74,6 +87,7 @@ func Merge(prev *ical.Component, event map[string]any) (out *ical.Component, cha
 	mOld = normalize(mOld)
 	// The master: the event without overrides; RDATE/EXDATE come from them.
 	m := newMerger(master, prev, mMeta)
+	m.stamp = stamp
 	if err := m.merge(withoutOverrides(mOld), withoutOverrides(newE), true, now); err != nil {
 		return nil, false, err
 	}
@@ -97,6 +111,7 @@ func Merge(prev *ical.Component, event map[string]any) (out *ical.Component, cha
 		}
 		oOld, oMeta := convertEvent(comp, prev)
 		om := newMerger(comp, prev, oMeta)
+		om.stamp = stamp
 		if err := om.merge(normalize(oOld), inst, false, now); err != nil {
 			return nil, false, err
 		}
@@ -276,6 +291,7 @@ type merger struct {
 	others []*ical.Component // other children
 
 	timingChanged bool // DTSTART changed: EXDATE/RDATE follow its form
+	stamp         bool // write DTSTAMP etc. and bump SEQUENCE
 }
 
 // loc is where a VEVENT line went in the event: a property (or a group
@@ -426,7 +442,7 @@ func (m *merger) merge(oldE, newE map[string]any, master bool, now time.Time) er
 		groups["recurrenceRule"] = true // UNTIL is written in the event's zone
 	}
 	existing := m.comp.Prop("DTSTART") != nil // a new event starts at 0
-	if master && existing && (groups["@timing"] || groups["recurrenceRule"] || groups["locations"]) && same(oldE["sequence"], newE["sequence"]) {
+	if m.stamp && master && existing && (groups["@timing"] || groups["recurrenceRule"] || groups["locations"]) && same(oldE["sequence"], newE["sequence"]) {
 		n, _ := num(oldE["sequence"])
 		newE["sequence"] = n + 1
 		groups["sequence"] = true
@@ -435,6 +451,9 @@ func (m *merger) merge(oldE, newE map[string]any, master bool, now time.Time) er
 		if err := m.group(g, oldE, newE); err != nil {
 			return err
 		}
+	}
+	if !m.stamp {
+		return nil
 	}
 	stamp := now.Format("20060102T150405Z")
 	m.touch("updated", "*", []*ical.Prop{{Name: "DTSTAMP", Value: stamp}, {Name: "LAST-MODIFIED", Value: stamp}})
@@ -1028,10 +1047,17 @@ func alarm(id string, a map[string]any, title string) (*ical.Component, []*ical.
 	if title == "" {
 		title = "Reminder"
 	}
-	va.Props = append(va.Props, &ical.Prop{Name: "DESCRIPTION", Value: ical.EscapeText(title)})
-	if action == "EMAIL" {
+	kept := renderICalProps(a["iCalProps"])
+	has := func(name string) bool {
+		return slices.ContainsFunc(kept, func(p *ical.Prop) bool { return p.Name == name })
+	}
+	if !has("DESCRIPTION") {
+		va.Props = append(va.Props, &ical.Prop{Name: "DESCRIPTION", Value: ical.EscapeText(title)})
+	}
+	if action == "EMAIL" && !has("SUMMARY") {
 		va.Props = append(va.Props, &ical.Prop{Name: "SUMMARY", Value: ical.EscapeText(title)})
 	}
+	va.Props = append(va.Props, kept...)
 	if t, err := time.Parse(time.RFC3339, str(a["acknowledged"])); err == nil {
 		va.Props = append(va.Props, &ical.Prop{Name: "ACKNOWLEDGED", Value: t.UTC().Format("20060102T150405Z")})
 	}
@@ -1047,7 +1073,7 @@ func alarm(id string, a map[string]any, title string) (*ical.Component, []*ical.
 		va.Props = append(va.Props, p)
 	}
 	for _, f := range slices.Sorted(maps.Keys(a)) {
-		if !slices.Contains([]string{"@type", "action", "trigger", "acknowledged", "relatedTo"}, f) {
+		if !slices.Contains([]string{"@type", "action", "trigger", "acknowledged", "relatedTo", "iCalProps"}, f) {
 			extra = append(extra, jsprop(ptr+"/"+escapePointer(f), a[f]))
 		}
 	}
@@ -1055,7 +1081,10 @@ func alarm(id string, a map[string]any, title string) (*ical.Component, []*ical.
 }
 
 // iCalProps renders jCal arrays back into lines.
-func (m *merger) iCalProps(v any) []*ical.Prop {
+func (m *merger) iCalProps(v any) []*ical.Prop { return renderICalProps(v) }
+
+// renderICalProps renders jCal arrays back into lines.
+func renderICalProps(v any) []*ical.Prop {
 	list, _ := v.([]any)
 	var out []*ical.Prop
 	for _, item := range list {

@@ -40,12 +40,14 @@ type Server struct {
 	store  *store.Store
 	basic  *auth.Basic
 	log    *slog.Logger
+	// perUser: caldav_per_user, fixed for the server's lifetime (see peruser.go).
+	perUser bool
 }
 
 // New creates the DAV handler. ap and lim are shared with the web UI.
 func New(cfg *config.Store, st *store.Store, ap *auth.AppPasswords, lim *auth.Limiter, log *slog.Logger) *Server {
 	return &Server{prefix: cfg.Get().DAVPrefix, cfg: cfg, store: st,
-		basic: auth.NewBasic(cfg.Password, ap, lim, log, "dav"), log: log}
+		basic: auth.NewBasic(cfg.Password, ap, lim, log, "dav"), log: log, perUser: cfg.Get().CalDAVPerUser}
 }
 
 // DefaultCalendars are created in a user's calendar home on first access:

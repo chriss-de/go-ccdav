@@ -11,6 +11,7 @@ import (
 
 	"github.com/chriss-de/go-ccdav/internal/carddav"
 	"github.com/chriss-de/go-ccdav/internal/ical"
+	"github.com/chriss-de/go-ccdav/internal/jscalendar"
 	"github.com/chriss-de/go-ccdav/internal/jscontact"
 	"github.com/chriss-de/go-ccdav/internal/store"
 )
@@ -45,6 +46,10 @@ func asSetError(err error) (*SetError, bool) {
 	if errors.As(err, &inv) {
 		return &SetError{Type: SetInvalidProperties, Properties: inv.Paths}, true
 	}
+	var cinv *jscalendar.InvalidError
+	if errors.As(err, &cinv) {
+		return &SetError{Type: SetInvalidProperties, Properties: cinv.Paths}, true
+	}
 	return nil, false
 }
 
@@ -74,14 +79,20 @@ func (v *View) writable(id string) error {
 // targetBook reads addressBookIds: exactly one address book, resolving
 // creation ids, writable by the caller.
 func (c *Call) targetBook(v *View, raw any) (*store.Collection, error) {
+	return c.target(v, raw, "addressBookIds")
+}
+
+// target reads a collection map (addressBookIds, calendarIds): exactly
+// one collection, resolving creation ids, writable by the caller.
+func (c *Call) target(v *View, raw any, prop string) (*store.Collection, error) {
 	m, ok := raw.(map[string]any)
 	if !ok || len(m) != 1 {
-		return nil, failSet(SetInvalidProperties, "addressBookIds must name exactly one address book", "addressBookIds")
+		return nil, failSet(SetInvalidProperties, prop+" must name exactly one collection", prop)
 	}
 	for id, val := range m {
 		real, ok := c.ResolveID(id)
-		if val != true || !ok {
-			return nil, failSet(SetInvalidProperties, "unknown address book "+id, "addressBookIds")
+		if val != true || !ok || v.Colls[real] == nil {
+			return nil, failSet(SetInvalidProperties, "unknown collection "+id, prop)
 		}
 		if err := v.writable(real); err != nil {
 			return nil, err
@@ -584,7 +595,8 @@ type bookChange struct {
 
 func (c *Call) parseBookProps(owner string, obj, current map[string]any) (bookChange, error) {
 	var ch bookChange
-	for k, val := range obj {
+	for _, k := range keysWithRemoved(obj, current) {
+		val := obj[k] // a property a patch removed is null
 		if current != nil && jsonEqual(val, current[k]) {
 			continue // unchanged, including server-set ones
 		}

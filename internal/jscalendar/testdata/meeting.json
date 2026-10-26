@@ -1,0 +1,135 @@
+{
+  "@type": "Event",
+  "alerts": {
+    "a1": {
+      "@type": "Alert",
+      "trigger": {
+        "@type": "OffsetTrigger",
+        "offset": "-PT15M"
+      }
+    },
+    "a2": {
+      "@type": "Alert",
+      "acknowledged": "2026-11-03T15:00:00Z",
+      "action": "email",
+      "trigger": {
+        "@type": "OffsetTrigger",
+        "offset": "PT0S",
+        "relativeTo": "end"
+      }
+    }
+  },
+  "color": "tomato",
+  "created": "2026-10-20T08:00:00Z",
+  "description": "Agenda:\n1. Budget\n2. Hiring",
+  "duration": "PT1H30M",
+  "freeBusyStatus": "busy",
+  "iCalProps": [
+    [
+      "x-moz-generation",
+      {},
+      "unknown",
+      "3"
+    ]
+  ],
+  "keywords": {
+    "Planning": true,
+    "Work": true
+  },
+  "links": {
+    "k1": {
+      "@type": "Link",
+      "href": "https://wiki.example.com/q4",
+      "rel": "describedby"
+    },
+    "k2": {
+      "@type": "Link",
+      "contentType": "application/pdf",
+      "href": "https://files.example.com/agenda.pdf"
+    }
+  },
+  "locations": {
+    "l1": {
+      "@type": "Location",
+      "coordinates": "geo:52.52,13.405",
+      "name": "Room 1"
+    }
+  },
+  "organizerCalendarAddress": "mailto:alice@example.com",
+  "participants": {
+    "p1": {
+      "@type": "Participant",
+      "calendarAddress": "mailto:alice@example.com",
+      "email": "alice@example.com",
+      "name": "Alice",
+      "participationStatus": "accepted",
+      "roles": {
+        "chair": true,
+        "owner": true
+      }
+    },
+    "p2": {
+      "@type": "Participant",
+      "calendarAddress": "mailto:bob@example.com",
+      "email": "bob@example.com",
+      "expectReply": true,
+      "kind": "individual",
+      "name": "Bob",
+      "participationStatus": "tentative",
+      "roles": {
+        "required": true
+      }
+    },
+    "p3": {
+      "@type": "Participant",
+      "calendarAddress": "mailto:carol@example.com",
+      "delegatedFrom": {
+        "mailto:eve@example.com": true
+      },
+      "email": "carol@example.com",
+      "roles": {
+        "optional": true
+      }
+    },
+    "p4": {
+      "@type": "Participant",
+      "calendarAddress": "mailto:room1@example.com",
+      "email": "room1@example.com",
+      "kind": "location",
+      "name": "Room 1",
+      "roles": {
+        "required": true
+      }
+    }
+  },
+  "priority": 1,
+  "privacy": "private",
+  "prodId": "-//Mozilla.org/NONSGML Mozilla Calendar V1.1//EN",
+  "relatedTo": {
+    "other@example.com": {
+      "@type": "Relation",
+      "relation": {
+        "sibling": true
+      }
+    }
+  },
+  "sequence": 2,
+  "start": "2026-11-03T14:00:00",
+  "status": "confirmed",
+  "timeZone": "Europe/Berlin",
+  "title": "Planning, Q4",
+  "uid": "meeting-1@example.com",
+  "updated": "2026-10-21T09:00:00Z",
+  "version": "2.0",
+  "virtualLocations": {
+    "v1": {
+      "@type": "VirtualLocation",
+      "features": {
+        "audio": true,
+        "video": true
+      },
+      "name": "Video call",
+      "uri": "https://meet.example.com/abc"
+    }
+  }
+}

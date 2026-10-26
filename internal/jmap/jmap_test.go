@@ -19,6 +19,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/chriss-de/go-ccdav/internal/auth"
+	"github.com/chriss-de/go-ccdav/internal/caldav"
 	"github.com/chriss-de/go-ccdav/internal/config"
 	"github.com/chriss-de/go-ccdav/internal/store"
 )
@@ -31,7 +32,10 @@ var testHash = sync.OnceValue(func() string {
 	return h
 })
 
-func uidOf(_ store.Kind, b []byte) (uid, comp string) {
+func uidOf(k store.Kind, b []byte) (uid, comp string) {
+	if k == store.Calendars {
+		return caldav.UIDOf(b)
+	}
 	for l := range strings.SplitSeq(string(b), "\n") {
 		if v, ok := strings.CutPrefix(l, "UID:"); ok {
 			return strings.TrimSpace(v), ""
@@ -57,7 +61,7 @@ func newEnv(t testing.TB) *env {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := config.Config{JMAP: true, Users: map[string]config.User{
-		"alice": {Password: testHash()},
+		"alice": {Password: testHash(), Email: "alice@example.com"},
 		"bob":   {Password: testHash()},
 		"carol": {Password: testHash()},
 	}, Groups: map[string][]string{"fam": {"alice"}}}
@@ -143,7 +147,7 @@ func decode[T any](t testing.TB, resp *http.Response) T {
 // responses as [name, args, id] with decoded args.
 func (e *env) api(user string, calls ...any) []apiResp {
 	e.t.Helper()
-	body, _ := json.Marshal(map[string]any{"using": []string{CapCore, capTest, CapContacts, CapPrincipals}, "methodCalls": calls})
+	body, _ := json.Marshal(map[string]any{"using": []string{CapCore, capTest, CapContacts, CapPrincipals, CapCalendars, CapAvailability, CapCalendarsParse}, "methodCalls": calls})
 	resp := e.do(user, "POST", "/jmap/api", "application/json", body)
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)

@@ -683,6 +683,7 @@ func (s *Store) Reconcile() error {
 	for _, a := range accts {
 		errs = append(errs, s.reconcileDeletions(a, cols), a.endBatch())
 	}
+	errs = append(errs, s.pruneOverlays())
 	return errors.Join(errs...)
 }
 

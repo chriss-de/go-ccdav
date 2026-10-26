@@ -62,6 +62,12 @@ type Meta struct {
 	ReadOnly bool `json:"read_only,omitempty"`
 	// Unsubscribed is the owner's JMAP isSubscribed=false; DAV ignores it.
 	Unsubscribed bool `json:"unsubscribed,omitempty"`
+	// JMAP calendar settings, which DAV doesn't know: isVisible=false,
+	// includeInAvailability ("" = "all") and default alerts (JSON).
+	Invisible                bool            `json:"invisible,omitempty"`
+	Availability             string          `json:"availability,omitempty"`
+	DefaultAlertsWithTime    json.RawMessage `json:"default_alerts_with_time,omitempty"`
+	DefaultAlertsWithoutTime json.RawMessage `json:"default_alerts_without_time,omitempty"`
 	// DeadProps stores unknown PROPPATCHed properties: "{ns}local" -> inner XML.
 	DeadProps map[string]string `json:"dead_props,omitempty"`
 }
@@ -91,6 +97,7 @@ type Store struct {
 	accts    map[string]*Account // "<owner>/<kind>"
 
 	prefs prefsStore
+	over  overlays
 }
 
 func New(root string, uidOf UIDFunc) *Store {
@@ -370,6 +377,8 @@ func (c *Collection) metaCopy() Meta {
 	m.Components = slices.Clone(m.Components)
 	m.DeadProps = maps.Clone(m.DeadProps)
 	m.Shares = slices.Clone(m.Shares)
+	m.DefaultAlertsWithTime = slices.Clone(m.DefaultAlertsWithTime)
+	m.DefaultAlertsWithoutTime = slices.Clone(m.DefaultAlertsWithoutTime)
 	return m
 }
 

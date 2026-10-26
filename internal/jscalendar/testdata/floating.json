@@ -1,0 +1,37 @@
+{
+  "@type": "Event",
+  "duration": "PT45M",
+  "prodId": "-//Example//Floating//EN",
+  "recurrenceRule": {
+    "@type": "RecurrenceRule",
+    "byDay": [
+      {
+        "@type": "NDay",
+        "day": "mo"
+      },
+      {
+        "@type": "NDay",
+        "day": "tu"
+      },
+      {
+        "@type": "NDay",
+        "day": "we"
+      },
+      {
+        "@type": "NDay",
+        "day": "th"
+      },
+      {
+        "@type": "NDay",
+        "day": "fr"
+      }
+    ],
+    "frequency": "daily",
+    "until": "2026-03-20T07:30:00"
+  },
+  "start": "2026-03-10T07:30:00",
+  "title": "Morning run (local time wherever I am)",
+  "uid": "floating-1",
+  "updated": "2026-01-01T00:00:00Z",
+  "version": "2.0"
+}

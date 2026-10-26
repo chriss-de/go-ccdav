@@ -24,6 +24,7 @@ type typeDef struct {
 	kind     store.Kind
 	codec    Codec
 	collProp string // "addressBookIds"
+	comp     string // only objects of this component ("VEVENT"); "" for all
 }
 
 // convCache keeps converted objects by collection, name and ETag, so
@@ -62,12 +63,22 @@ type entry struct {
 // collection map, created and (if the file has none) updated. false if
 // it is gone or can't be converted; the latter is logged.
 func (h *Handler) load(t *typeDef, v *View, ref store.ObjectRef) (*entry, bool) {
+	e, ok := h.loadRaw(t, v, ref)
+	if ok && v.hasOverlay() {
+		e.obj = applyOverlay(e.obj, v.overlayOf(ref.ID))
+	}
+	return e, ok
+}
+
+// loadRaw is load without the caller's per-user data: the object as
+// stored.
+func (h *Handler) loadRaw(t *typeDef, v *View, ref store.ObjectRef) (*entry, bool) {
 	col := v.Colls[ref.Coll]
 	if col == nil {
 		return nil, false
 	}
 	info, err := col.Stat(ref.Name)
-	if err != nil {
+	if err != nil || t.comp != "" && info.Comp != t.comp {
 		return nil, false
 	}
 	key := ref.Coll + "/" + ref.Name + "/" + info.ETag
@@ -87,7 +98,9 @@ func (h *Handler) load(t *typeDef, v *View, ref store.ObjectRef) (*entry, bool) 
 	obj := maps.Clone(conv)
 	obj["id"] = ref.ID
 	obj[t.collProp] = map[string]any{ref.Coll: true}
-	obj["created"] = ref.Created.Format(time.RFC3339)
+	if _, ok := obj["created"]; !ok { // the file's own (CREATED) wins
+		obj["created"] = ref.Created.Format(time.RFC3339)
+	}
 	if _, ok := obj["updated"]; !ok {
 		obj["updated"] = info.ModTime.UTC().Format(time.RFC3339)
 	}

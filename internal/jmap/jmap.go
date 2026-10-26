@@ -92,6 +92,7 @@ func New(cfg *config.Store, st *store.Store, dataDir string, ap *auth.AppPasswor
 	h.Register("Core/echo", CapCore, echo)
 	h.registerContacts()
 	h.registerPrincipals()
+	h.registerCalendars()
 	h.hub = newHub(h)
 	st.OnChange(func(owner string, _ store.Kind) { h.hub.mark(owner) })
 	return h

@@ -169,6 +169,7 @@ type SharePrefs struct {
 	Color       string `json:"color,omitempty"`
 	Order       string `json:"order,omitempty"`
 	Hidden      bool   `json:"hidden,omitempty"`
+	Invisible   bool   `json:"invisible,omitempty"` // JMAP isVisible=false
 	Version     uint64 `json:"version,omitempty"`
 }
 

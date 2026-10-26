@@ -31,8 +31,10 @@ var pushTypes = map[string]struct {
 	kind  store.Kind
 	level store.Level
 }{
-	"AddressBook": {store.AddressBooks, store.LevelCollections},
-	"ContactCard": {store.AddressBooks, store.LevelObjects},
+	"AddressBook":   {store.AddressBooks, store.LevelCollections},
+	"ContactCard":   {store.AddressBooks, store.LevelObjects},
+	"Calendar":      {store.Calendars, store.LevelCollections},
+	"CalendarEvent": {store.Calendars, store.LevelObjects},
 }
 
 type hub struct {

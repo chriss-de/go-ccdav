@@ -27,7 +27,21 @@ type View struct {
 	Colls     map[string]*store.Collection // collection id -> collection
 	Access    map[string]string            // collection id -> store access
 
-	st *store.Store
+	st      *store.Store
+	overlay *store.Overlay // the caller's per-user data in a shared calendar account, loaded on use
+}
+
+// hasOverlay reports whether per-user data applies: calendars someone
+// else owns.
+func (v *View) hasOverlay() bool { return !v.Own && v.Kind == store.Calendars }
+
+// Overlay returns the caller's per-user data for this account.
+func (v *View) Overlay() store.Overlay {
+	if v.overlay == nil {
+		o, _ := v.st.Overlay(v.User, v.Owner)
+		v.overlay = &o
+	}
+	return *v.overlay
 }
 
 // View resolves an accountId argument. accountNotFound if the user can't
@@ -57,6 +71,9 @@ func (h *Handler) view(user, accountID string, kind store.Kind) (*View, error) {
 	for _, col := range h.store.All() {
 		if col.Owner != a.owner || col.Kind != kind {
 			continue
+		}
+		if kind == store.Calendars && !hasEvents(col) {
+			continue // task lists and journals: not JMAP calendars
 		}
 		if acc := col.AccessOf(user, groups); acc != "" {
 			id := col.ID()
@@ -100,23 +117,39 @@ func (v *View) State(l store.Level) string {
 	return v.state(l, home, tok)
 }
 
+// state renders a state string. Events in someone else's calendars
+// carry the version of the caller's per-user data as a fourth part.
 func (v *View) state(l store.Level, home string, tok uint64) string {
-	return home + "-" + strconv.FormatUint(tok, 10) + "-" + v.tag(l)
+	s := home + "-" + strconv.FormatUint(tok, 10) + "-" + v.tag(l)
+	if v.hasOverlay() && l == store.LevelObjects {
+		s += "-" + strconv.FormatUint(v.Overlay().Version, 10)
+	}
+	return s
 }
 
-// token parses a state string of this view; ok is false if it belongs to
-// another log or the tag changed.
-func (v *View) token(l store.Level, state string) (uint64, bool) {
+// token parses a state string of this view into the log token and the
+// per-user version; ok is false if it belongs to another log or the tag
+// changed.
+func (v *View) token(l store.Level, state string) (tok, perUser uint64, ok bool) {
 	parts := strings.Split(state, "-")
-	if len(parts) != 3 {
-		return 0, false
+	want := 3
+	if v.hasOverlay() && l == store.LevelObjects {
+		want = 4
+	}
+	if len(parts) != want {
+		return 0, 0, false
 	}
 	home, _ := v.Log.State(l)
 	tok, err := strconv.ParseUint(parts[1], 10, 64)
 	if err != nil || parts[0] != home || parts[2] != v.tag(l) {
-		return 0, false
+		return 0, 0, false
 	}
-	return tok, true
+	if want == 4 {
+		if perUser, err = strconv.ParseUint(parts[3], 10, 64); err != nil || perUser > v.Overlay().Version {
+			return 0, 0, false
+		}
+	}
+	return tok, perUser, true
 }
 
 // ChangesArgs are the arguments of every Foo/changes method.
@@ -152,7 +185,7 @@ func (c *Call) Changes(raw json.RawMessage, kind store.Kind, l store.Level) (*Ch
 	if err != nil {
 		return nil, err
 	}
-	since, ok := v.token(l, args.SinceState)
+	since, perUserSince, ok := v.token(l, args.SinceState)
 	if !ok {
 		return nil, Errorf(ErrCannotCalculateChanges, "unknown state")
 	}
@@ -194,6 +227,24 @@ func (c *Call) Changes(raw json.RawMessage, kind store.Kind, l store.Level) (*Ch
 			resp.Created = append(resp.Created, ch.ID)
 		default:
 			resp.Updated = append(resp.Updated, ch.ID)
+		}
+	}
+	// The caller's own per-user changes count as updates.
+	if v.hasOverlay() && l == store.LevelObjects {
+		seen := map[string]bool{}
+		for _, list := range [][]string{resp.Created, resp.Updated, resp.Destroyed} {
+			for _, id := range list {
+				seen[id] = true
+			}
+		}
+		o := v.Overlay()
+		for _, id := range slices.Sorted(maps.Keys(o.Events)) {
+			if o.Events[id].V <= perUserSince || seen[id] {
+				continue
+			}
+			if ref, live := v.Log.Lookup(id); live && v.Colls[ref.Coll] != nil {
+				resp.Updated = append(resp.Updated, id)
+			}
 		}
 	}
 	return resp, nil

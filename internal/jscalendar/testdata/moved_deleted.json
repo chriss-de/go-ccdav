@@ -1,0 +1,37 @@
+{
+  "@type": "Event",
+  "duration": "PT30M",
+  "prodId": "-//Apple Inc.//macOS 15.0//EN",
+  "recurrenceOverrides": {
+    "2025-10-13T10:00:00": {
+      "duration": "PT1H",
+      "start": "2025-10-14T15:00:00",
+      "title": "Standup (moved)"
+    },
+    "2025-10-20T10:00:00": {
+      "excluded": true
+    },
+    "2025-11-03T10:00:00": {
+      "start": "2025-10-31T08:00:00",
+      "timeZone": "Etc/UTC",
+      "title": "Standup (moved earlier, RECURRENCE-ID in UTC)"
+    }
+  },
+  "recurrenceRule": {
+    "@type": "RecurrenceRule",
+    "byDay": [
+      {
+        "@type": "NDay",
+        "day": "mo"
+      }
+    ],
+    "count": 6,
+    "frequency": "weekly"
+  },
+  "start": "2025-10-06T10:00:00",
+  "timeZone": "Europe/Berlin",
+  "title": "Standup",
+  "uid": "weekly-standup@example.com",
+  "updated": "2025-10-01T12:00:00Z",
+  "version": "2.0"
+}

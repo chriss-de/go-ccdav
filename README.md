@@ -30,7 +30,7 @@ Not implemented yet: scheduling/iMIP and RSVP links. The design is in [`ccdav-de
 | [6868](https://www.rfc-editor.org/rfc/rfc6868) | Parameter value encoding | |
 | [7636](https://www.rfc-editor.org/rfc/rfc7636) | PKCE | OIDC login of the web UI |
 
-**JMAP:** in progress, off by default (`jmap: true`). The [core protocol](https://www.rfc-editor.org/rfc/rfc8620) works (session, result references, blobs), and so do [contacts](https://www.rfc-editor.org/rfc/rfc9610): `AddressBook/get`, `/changes` and `/set`; `ContactCard/get`, `/changes`, `/query`, `/set` and `/copy`. vCards stay the stored format and are converted to and from [JSContact](https://www.rfc-editor.org/rfc/rfc9553) ([RFC 9555](https://www.rfc-editor.org/rfc/rfc9555)). A JMAP edit rewrites only the vCard lines it changes, so what DAV clients stored (Apple's `X-` properties, groups, labels) stays. New cards are written as vCard 3.0. JSContact data a vCard can't hold goes into `X-JSPROP` lines (`JSPROP` in vCard 4), and entry ids into `X-PROP-ID`/`PROP-ID` parameters. A DAV client that rewrites the card may drop those. Users and groups are [principals](https://www.rfc-editor.org/rfc/rfc9670) (`Principal/get`, `/query`), and owners share address books via `shareWith` (read or read-write, the same shares as in DAV and the web UI). Push works over EventSource: one `StateChange` per second at most, and only for what the user can see. [Calendars](https://datatracker.ietf.org/doc/draft-ietf-jmap-calendars/) work too: `Calendar/get`, `/changes` and `/set`; `CalendarEvent/get`, `/changes`, `/query` (with `expandRecurrences`), `/set`, `/copy` and `/parse`; `Principal/getAvailability`; and `ParticipantIdentity/get`. Events are converted between iCalendar and [JSCalendar](https://datatracker.ietf.org/doc/draft-ietf-calext-jscalendarbis/), and recurrence exceptions become `recurrenceOverrides`. As with contacts, a JMAP edit rewrites only the lines it changes. Changing or cancelling one occurrence writes an override VEVENT or an `EXDATE`, and missing VTIMEZONEs are generated. In someone else's calendar, `alerts`, `color`, `keywords`, `freeBusyStatus` and `useDefaultAlerts` are per user: each person sees the owner's values until they set their own, even on calendars shared read-only. With `caldav_per_user: true` CalDAV clients get the same: they read the owner's events with their own values, and their saves are split. Their own values are kept for them; the rest goes into the shared event. So everyone with write access keeps their own alarms instead of overwriting everyone else's. Their ETags and sync tokens carry their own version, and the owner sees no difference. Calendars shared read-only stay read-only for CalDAV clients, which then don't save anything. There, per-user values are available via JMAP only. Invitations aren't sent (`sendSchedulingMessages` is ignored). Calendars created via JMAP take events and tasks. Task lists and journals stay DAV-only. Both calendar specs are still drafts. Not yet: `ShareNotification`, `CalendarEventNotification` and Web Push. App passwords work for JMAP as they do for DAV.
+JMAP ([RFC 8620](https://www.rfc-editor.org/rfc/rfc8620) and the contacts, sharing and calendars specs) is optional; see [JMAP](#jmap).
 
 ## Quick start
 
@@ -89,6 +89,38 @@ ccdav shares  [alice]
 ```
 
 The web UI does the same. A running server picks up command-line changes on `SIGHUP`.
+
+## JMAP
+
+JMAP is a JSON API next to CalDAV and CardDAV. It is in progress and off by default: set `jmap: true` (see [`config.yaml`](#configyaml)). App passwords work for it as they do for DAV.
+
+**Storage:** files stay the source of truth. JMAP converts vCards and iCalendar objects on the fly, and a JMAP edit rewrites only the lines it changes, so what DAV clients stored (Apple's `X-` properties, groups, labels, alarms) survives.
+
+**What works:**
+
+- **Core** ([RFC 8620](https://www.rfc-editor.org/rfc/rfc8620)): session at `/.well-known/jmap`, method calls with result references, blob upload and download.
+- **Contacts** ([RFC 9610](https://www.rfc-editor.org/rfc/rfc9610)):
+  - `AddressBook/get`, `/changes`, `/set`;
+  - `ContactCard/get`, `/changes`, `/query`, `/set`, `/copy`;
+  - converted to and from [JSContact](https://www.rfc-editor.org/rfc/rfc9553) as [RFC 9555](https://www.rfc-editor.org/rfc/rfc9555) describes;
+  - new cards are written as vCard 3.0;
+  - JSContact data a vCard can't hold goes into `X-JSPROP` lines (`JSPROP` in vCard 4), and entry ids into `X-PROP-ID`/`PROP-ID` parameters. A DAV client that rewrites the card may drop these.
+- **Calendars** ([draft](https://datatracker.ietf.org/doc/draft-ietf-jmap-calendars/)):
+  - `Calendar/get`, `/changes`, `/set`;
+  - `CalendarEvent/get`, `/changes`, `/query` (with `expandRecurrences`), `/set`, `/copy`, `/parse`;
+  - `Principal/getAvailability` and `ParticipantIdentity/get`;
+  - events are [JSCalendar](https://datatracker.ietf.org/doc/draft-ietf-calext-jscalendarbis/), and recurrence exceptions are `recurrenceOverrides`. Changing or cancelling one occurrence writes an override VEVENT or an `EXDATE`, and missing VTIMEZONEs are generated;
+  - calendars created via JMAP take events and tasks.
+- **Sharing** ([RFC 9670](https://www.rfc-editor.org/rfc/rfc9670)): users and groups are principals (`Principal/get`, `/query`). Owners share address books and calendars via `shareWith`, read-only or read-write. These are the same shares as in DAV and the web UI.
+- **Per-user values:** in someone else's calendar, `alerts`, `color`, `keywords`, `freeBusyStatus` and `useDefaultAlerts` belong to each user. Everyone sees the owner's values until they set their own, even in calendars shared read-only. CalDAV clients see the owner's.
+- **Push** over EventSource: at most one `StateChange` per second, only for what the user can see.
+
+**Not yet, or limited:**
+
+- Both calendar specs are still drafts.
+- No invitations are sent; `sendSchedulingMessages` is ignored.
+- Task lists and journals are DAV-only (JMAP for tasks is a separate draft).
+- Not implemented: `ShareNotification`, `CalendarEventNotification`, Web Push.
 
 ## Container
 

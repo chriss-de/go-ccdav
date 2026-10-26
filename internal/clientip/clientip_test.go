@@ -6,7 +6,7 @@ import (
 )
 
 func TestFrom(t *testing.T) {
-	trusted, err := ParsePrefixes([]string{"10.88.0.0/16", "127.0.0.1"})
+	trusted, err := ParsePrefixes([]string{"10.88.0.0/16", "127.0.0.1", "fe80::1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,6 +22,7 @@ func TestFrom(t *testing.T) {
 		{"10.88.0.5:5000", "garbage, 198.51.100.7", "198.51.100.7"},
 		{"10.88.0.5:5000", "198.51.100.7, garbage", "10.88.0.5"},
 		{"[::ffff:10.88.0.5]:80", "2001:db8::1", "2001:db8::1"},
+		{"[fe80::1%eth0]:80", "2001:db8::1", "2001:db8::1"}, // link-local proxy with zone
 	} {
 		r, _ := http.NewRequest("GET", "/", nil)
 		r.RemoteAddr = c.remote

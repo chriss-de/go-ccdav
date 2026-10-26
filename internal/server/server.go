@@ -97,7 +97,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip := clientip.From(r, s.cfg.Get().Trusted)
 	user := s.serve(sw, r, ip)
 	s.log.Info("request", "method", r.Method, "path", r.URL.Path, "status", sw.status,
-		"user", user, "ip", ip, "dur", time.Since(start).Round(time.Microsecond))
+		"user", user, "ip", ip, "dur_ms", float64(time.Since(start).Microseconds())/1000)
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request, ip string) (user string) {

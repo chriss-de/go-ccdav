@@ -14,7 +14,7 @@
 dav_prefix: /dav/
 ui_prefix: /ui/
 
-# JMAP (work in progress: contacts read-only, no calendars yet). Served
+# JMAP (work in progress: contacts, no calendars yet). Served
 # under jmap_prefix and /.well-known/jmap. Needs a restart.
 # jmap: true
 # jmap_prefix: /jmap/

@@ -40,6 +40,15 @@ func (h *Handler) registerContacts() {
 	h.Register("ContactCard/query", CapContacts, func(c *Call, args json.RawMessage) (any, error) {
 		return c.contactQuery(args)
 	})
+	h.Register("AddressBook/set", CapContacts, func(c *Call, args json.RawMessage) (any, error) {
+		return c.addressBookSet(args)
+	})
+	h.Register("ContactCard/set", CapContacts, func(c *Call, args json.RawMessage) (any, error) {
+		return c.contactSet(args)
+	})
+	h.Register("ContactCard/copy", CapContacts, func(c *Call, args json.RawMessage) (any, error) {
+		return c.contactCopy(args)
+	})
 	h.Register("ContactCard/queryChanges", CapContacts, func(*Call, json.RawMessage) (any, error) {
 		return nil, Errorf(ErrCannotCalculateChanges, "query changes are not supported; query again")
 	})
@@ -83,7 +92,7 @@ func (c *Call) addressBookGet(raw json.RawMessage) (any, error) {
 // isSubscribed is false when they hid it.
 func (c *Call) addressBook(v *View, col *store.Collection) map[string]any {
 	m := col.Meta()
-	name, order, subscribed := m.DisplayName, m.Order, true
+	name, order, subscribed := m.DisplayName, m.Order, !m.Unsubscribed
 	if name == "" {
 		name = col.Name
 	}

@@ -234,6 +234,16 @@ type SetError struct {
 	Type        string   `json:"type"`
 	Description string   `json:"description,omitempty"`
 	Properties  []string `json:"properties,omitempty"`
+	ExistingID  string   `json:"existingId,omitempty"` // alreadyExists
+}
+
+// setErr is a SetError as an error, for helpers of /set methods.
+type setErr struct{ SetError }
+
+func (e *setErr) Error() string { return e.Type + ": " + e.Description }
+
+func failSet(typ, desc string, props ...string) error {
+	return &setErr{SetError{Type: typ, Description: desc, Properties: props}}
 }
 
 // SetResponse is the response of every Foo/set method. Empty maps and

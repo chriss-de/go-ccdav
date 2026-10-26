@@ -56,6 +56,18 @@ const (
 	ErrAnchorNotFound              = "anchorNotFound"
 	ErrUnsupportedSort             = "unsupportedSort"
 	ErrUnsupportedFilter           = "unsupportedFilter"
+	ErrFromAccountNotFound         = "fromAccountNotFound"
+)
+
+// SetError types (RFC 8620 §5.3, RFC 9610).
+const (
+	SetForbidden              = "forbidden"
+	SetNotFound               = "notFound"
+	SetInvalidProperties      = "invalidProperties"
+	SetInvalidPatch           = "invalidPatch"
+	SetAlreadyExists          = "alreadyExists"
+	SetTooLarge               = "tooLarge"
+	SetAddressBookHasContents = "addressBookHasContents"
 )
 
 // MethodError is a method-level error, sent as an "error" response.
@@ -121,7 +133,21 @@ type Call struct {
 	User string
 	// created maps creation ids ("#x" without the "#") to the ids of
 	// objects created earlier in the same request.
-	created map[string]string
+	created  map[string]string
+	id       string       // the current method call id
+	implicit []invocation // responses of implicit calls (RFC 8620 §5.4)
+}
+
+// Respond adds the response of an implicit method call, made on behalf
+// of the current one (like /copy's destroy of the originals). It follows
+// the current method's response.
+func (c *Call) Respond(name string, args any) error {
+	b, err := json.Marshal(args)
+	if err != nil {
+		return err
+	}
+	c.implicit = append(c.implicit, invocation{Name: name, Args: b, ID: c.id})
+	return nil
 }
 
 // Handler returns the handler serving the call.
@@ -196,7 +222,9 @@ func (h *Handler) api(w http.ResponseWriter, r *http.Request, user string) {
 	}
 	resp := response{MethodResponses: []invocation{}}
 	for _, iv := range req.MethodCalls {
+		c.id, c.implicit = iv.ID, nil
 		resp.MethodResponses = append(resp.MethodResponses, h.run(c, using, iv, resp.MethodResponses))
+		resp.MethodResponses = append(resp.MethodResponses, c.implicit...)
 	}
 	if req.CreatedIDs != nil {
 		resp.CreatedIDs = &c.created

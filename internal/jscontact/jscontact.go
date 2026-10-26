@@ -7,11 +7,14 @@
 // vCardParams of the property they belong to. Apple's grouped labels
 // (item1.X-ABLabel) become the label of the grouped property.
 //
-// Ids of entries in maps like emails or phones are positional ("e1",
-// "e2", ...): stable as long as the vCard doesn't change.
+// Ids of entries in maps like emails or phones come from the line's
+// PROP-ID (X-PROP-ID in version 3), which Merge writes; without one they
+// are positional ("e1", "e2", ...), stable as long as the vCard doesn't
+// change. Merge (merge.go) is the way back.
 package jscontact
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -34,8 +37,30 @@ func (Codec) ToJMAP(raw []byte) (map[string]any, error) {
 
 // FromVCard converts a parsed VCARD component.
 func FromVCard(vc *ical.Component) (map[string]any, error) {
+	card, _, err := convert(vc)
+	return card, err
+}
+
+// loc is where a vCard line went in the card: a top-level property and,
+// for one entry of a map property like emails, the entry's id. An empty
+// id means the line belongs to the property as a whole; an empty prop
+// means it maps to nothing (VERSION).
+type loc struct{ prop, id string }
+
+// entryProps are the card's map properties of entries with ids, with
+// the prefix of their positional ids.
+var entryProps = map[string]string{
+	"nicknames": "n", "organizations": "o", "titles": "t", "emails": "e", "phones": "p",
+	"addresses": "a", "links": "l", "media": "m", "cryptoKeys": "k", "calendars": "c",
+	"schedulingAddresses": "s", "directories": "d", "onlineServices": "s", "anniversaries": "k",
+	"notes": "n", "preferredLanguages": "l",
+}
+
+// convert converts vc and reports for each of its properties where it
+// went in the card.
+func convert(vc *ical.Component) (map[string]any, []loc, error) {
 	if vc == nil || vc.Name != "VCARD" {
-		return nil, errors.New("jscontact: not a VCARD")
+		return nil, nil, errors.New("jscontact: not a VCARD")
 	}
 	b := &builder{card: map[string]any{"@type": "Card", "version": "1.0"}, labels: map[string]string{}, labelUsed: map[string]bool{}}
 	// Apple-style labels apply to the other properties of their group.
@@ -44,13 +69,30 @@ func FromVCard(vc *ical.Component) (map[string]any, error) {
 			b.labels[strings.ToUpper(p.Group)] = appleLabel(p.Text())
 		}
 	}
-	for _, p := range vc.Props {
+	origins := make([]loc, len(vc.Props))
+	for i, p := range vc.Props {
+		b.at = loc{}
 		b.prop(p)
+		origins[i] = b.at
 	}
-	// A label whose group had no mapped property stays with it.
-	for _, p := range vc.Props {
-		if p.Name == "X-ABLABEL" && (p.Group == "" || !b.labelUsed[strings.ToUpper(p.Group)]) {
+	// A used label goes with the line of its group; any other stays as is.
+	groupLoc := map[string]loc{}
+	for i, p := range vc.Props {
+		g := strings.ToUpper(p.Group)
+		if _, seen := groupLoc[g]; !seen && g != "" && p.Name != "X-ABLABEL" && origins[i].prop != "vCardProps" {
+			groupLoc[g] = origins[i]
+		}
+	}
+	for i, p := range vc.Props {
+		if p.Name != "X-ABLABEL" {
+			continue
+		}
+		g := strings.ToUpper(p.Group)
+		if l, ok := groupLoc[g]; ok && b.labelUsed[g] {
+			origins[i] = l
+		} else {
 			b.unknownProp(p)
+			origins[i] = loc{"vCardProps", ""}
 		}
 	}
 	if b.name != nil {
@@ -59,7 +101,11 @@ func FromVCard(vc *ical.Component) (map[string]any, error) {
 	if len(b.unknown) > 0 {
 		b.card["vCardProps"] = b.unknown
 	}
-	return b.card, nil
+	// JSContact properties without a vCard equivalent, stored by Merge.
+	for _, j := range b.jsprops {
+		setPointer(b.card, j.ptr, j.val)
+	}
+	return b.card, origins, nil
 }
 
 type builder struct {
@@ -68,44 +114,101 @@ type builder struct {
 	labels    map[string]string // vCard group -> label
 	labelUsed map[string]bool   // groups whose label went into a mapped property
 	unknown   []any             // vCardProps
+	jsprops   []jsprop
+	at        loc    // where the current line went
+	propID    string // PROP-ID of the current line
 }
 
-// entry adds an object to the map property prop, with an id made of
-// prefix and its position.
+type jsprop struct {
+	ptr string
+	val any
+}
+
+// entry adds an object to the map property prop. Its id is the line's
+// PROP-ID if it has a usable one, else prefix and position.
 func (b *builder) entry(prop, prefix string, obj map[string]any) {
 	m, _ := b.card[prop].(map[string]any)
 	if m == nil {
 		m = map[string]any{}
 		b.card[prop] = m
 	}
-	m[prefix+strconv.Itoa(len(m)+1)] = obj
+	id := b.propID
+	b.propID = ""
+	if !validID(id) || m[id] != nil {
+		for n := len(m) + 1; ; n++ {
+			if id = prefix + strconv.Itoa(n); m[id] == nil {
+				break
+			}
+		}
+	}
+	m[id] = obj
+	b.at = loc{prop, id}
+}
+
+// validID reports whether s is a JMAP Id (RFC 8620 §1.2).
+func validID(s string) bool {
+	if s == "" || len(s) > 255 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 func (b *builder) nameObj() map[string]any {
 	if b.name == nil {
 		b.name = map[string]any{"@type": "Name"}
 	}
+	b.at = loc{"name", ""}
 	return b.name
 }
 
+// whole marks the current line as belonging to prop as a whole.
+func (b *builder) whole(prop string) { b.at = loc{prop, ""} }
+
 func (b *builder) prop(p *ical.Prop) {
 	pp := newParams(p)
+	if b.propID = pp.take("prop-id"); b.propID == "" {
+		b.propID = pp.take("x-prop-id")
+	}
 	var obj map[string]any // a map entry; gets contexts, pref, label, vCardParams
 	switch p.Name {
-	case "BEGIN", "END", "VERSION", "X-ABLABEL":
+	case "VERSION", "X-ABLABEL":
 		return
 	case "UID":
 		b.card["uid"] = p.Text()
+		b.whole("uid")
 		return
 	case "KIND", "X-ADDRESSBOOKSERVER-KIND":
 		b.card["kind"] = strings.ToLower(p.Text())
+		b.whole("kind")
 		return
 	case "PRODID":
 		b.card["prodId"] = p.Text()
+		b.whole("prodId")
 		return
 	case "REV":
 		if t, ok := parseTimestamp(p.Value); ok {
 			b.card["updated"] = t
+			b.whole("updated")
+			return
+		}
+	case "JSPROP", "X-JSPROP":
+		ptr := p.Param("JSPTR")
+		if ptr == "" {
+			ptr = p.Param("X-JSPTR")
+		}
+		var v any
+		if ptr != "" && json.Unmarshal([]byte(p.Text()), &v) == nil {
+			b.jsprops = append(b.jsprops, jsprop{ptr, v})
+			segs := strings.SplitN(ptr, "/", 3)
+			b.at = loc{segs[0], ""}
+			if _, ok := entryProps[segs[0]]; ok && len(segs) > 1 {
+				b.at.id = segs[1]
+			}
 			return
 		}
 	case "FN":
@@ -121,8 +224,9 @@ func (b *builder) prop(p *ical.Prop) {
 				}
 			}
 		}
+		name := b.nameObj()
 		if len(comps) > 0 {
-			b.nameObj()["components"] = comps
+			name["components"] = comps
 		}
 		return
 	case "MEMBER", "X-ADDRESSBOOKSERVER-MEMBER":
@@ -132,6 +236,7 @@ func (b *builder) prop(p *ical.Prop) {
 			v = strings.TrimPrefix(v, "urn:uuid:")
 		}
 		setKey(b.card, "members", v)
+		b.whole("members")
 		return
 	case "CATEGORIES":
 		for _, k := range ical.SplitList(p.Value) {
@@ -139,14 +244,19 @@ func (b *builder) prop(p *ical.Prop) {
 				setKey(b.card, "keywords", k)
 			}
 		}
+		b.whole("keywords")
 		return
 	case "NICKNAME":
-		for _, n := range ical.SplitList(p.Value) {
+		vals := ical.SplitList(p.Value)
+		for _, n := range vals {
 			if n = ical.UnescapeText(n); n != "" {
 				o := map[string]any{"@type": "Nickname", "name": n}
 				pp.apply(o, b.label(p))
 				b.entry("nicknames", "n", o)
 			}
+		}
+		if len(vals) > 1 {
+			b.whole("nicknames") // one line, several entries
 		}
 		return
 	case "ORG":
@@ -167,7 +277,7 @@ func (b *builder) prop(p *ical.Prop) {
 			obj["units"] = units
 		}
 		if len(obj) == 0 {
-			return
+			break
 		}
 		obj["@type"] = "Organization"
 		pp.apply(obj, b.label(p))
@@ -198,7 +308,11 @@ func (b *builder) prop(p *ical.Prop) {
 		b.entry("addresses", "a", obj)
 		return
 	case "GEO":
-		obj = map[string]any{"@type": "Address", "coordinates": p.Text()}
+		geo := p.Text()
+		if lat, lon, ok := strings.Cut(geo, ";"); ok && !strings.HasPrefix(geo, "geo:") {
+			geo = "geo:" + lat + "," + lon // version 3: "lat;lon"
+		}
+		obj = map[string]any{"@type": "Address", "coordinates": geo}
 		pp.apply(obj, b.label(p))
 		b.entry("addresses", "a", obj)
 		return
@@ -240,7 +354,7 @@ func (b *builder) prop(p *ical.Prop) {
 		v := p.Text()
 		if strings.EqualFold(pp.value, "text") {
 			obj["user"] = v
-		} else {
+		} else if v != "" {
 			obj["uri"] = v
 		}
 		service := pp.take("service-type")
@@ -248,7 +362,7 @@ func (b *builder) prop(p *ical.Prop) {
 			service = pp.take("x-service-type")
 		}
 		if service == "" && p.Name == "X-SOCIALPROFILE" {
-			service = pp.takeFirstType()
+			service = pp.takeService()
 		}
 		if service != "" {
 			obj["service"] = service
@@ -263,12 +377,28 @@ func (b *builder) prop(p *ical.Prop) {
 		return
 	case "BDAY", "ANNIVERSARY", "DEATHDATE":
 		if d, ok := parseDate(p.Value); ok && !strings.EqualFold(pp.value, "text") {
+			// Apple writes birthdays without a year as 1604-MM-DD.
+			if y := pp.take("x-apple-omit-year"); y != "" && d["year"] != nil && strconv.Itoa(d["year"].(int)) == y {
+				delete(d, "year")
+			}
 			kind := map[string]string{"BDAY": "birth", "ANNIVERSARY": "wedding", "DEATHDATE": "death"}[p.Name]
 			obj = map[string]any{"@type": "Anniversary", "kind": kind, "date": d}
 			pp.apply(obj, "")
 			delete(obj, "contexts")
 			b.entry("anniversaries", "k", obj)
 			return
+		}
+	case "X-ABDATE":
+		// Apple's version 3 anniversary: a date labeled Anniversary.
+		if b.labels[strings.ToUpper(p.Group)] == "Anniversary" {
+			if d, ok := parseDate(p.Value); ok {
+				b.label(p)
+				obj = map[string]any{"@type": "Anniversary", "kind": "wedding", "date": d}
+				pp.apply(obj, "")
+				delete(obj, "contexts")
+				b.entry("anniversaries", "k", obj)
+				return
+			}
 		}
 	case "NOTE":
 		obj = map[string]any{"@type": "Note", "note": p.Text()}
@@ -282,19 +412,64 @@ func (b *builder) prop(p *ical.Prop) {
 		b.entry("preferredLanguages", "l", obj)
 		return
 	case "RELATED":
-		rel, _ := b.card["relatedTo"].(map[string]any)
-		if rel == nil {
-			rel = map[string]any{}
-			b.card["relatedTo"] = rel
-		}
-		r := map[string]any{"@type": "Relation"}
+		r := b.relation(p.Text())
 		for _, t := range pp.takeTypes(nil) {
 			setKey(r, "relation", t)
 		}
-		rel[p.Text()] = r
 		return
+	case "X-ABRELATEDNAMES":
+		// Apple's version 3 relation: a name labeled with the relation.
+		if rel, ok := appleRelations[strings.ToLower(b.labels[strings.ToUpper(p.Group)])]; ok && p.Text() != "" {
+			b.label(p)
+			setKey(b.relation(p.Text()), "relation", rel)
+			return
+		}
 	}
 	b.unknownProp(p)
+}
+
+// relation returns the Relation object for a related card or name.
+func (b *builder) relation(key string) map[string]any {
+	rel, _ := b.card["relatedTo"].(map[string]any)
+	if rel == nil {
+		rel = map[string]any{}
+		b.card["relatedTo"] = rel
+	}
+	r, _ := rel[key].(map[string]any)
+	if r == nil {
+		r = map[string]any{"@type": "Relation"}
+		rel[key] = r
+	}
+	b.whole("relatedTo")
+	return r
+}
+
+// appleRelations maps Apple's relation labels to JSContact relations.
+var appleRelations = map[string]string{
+	"father": "parent", "mother": "parent", "parent": "parent",
+	"brother": "sibling", "sister": "sibling", "child": "child", "son": "child", "daughter": "child",
+	"friend": "friend", "spouse": "spouse", "partner": "spouse", "assistant": "agent",
+}
+
+// setPointer sets the value at a JSON pointer-like path (without the
+// leading "/"), creating objects on the way.
+func setPointer(card map[string]any, ptr string, v any) {
+	segs := strings.Split(ptr, "/")
+	m := card
+	for _, s := range segs[:len(segs)-1] {
+		s = unescapePointer(s)
+		next, ok := m[s].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			m[s] = next
+		}
+		m = next
+	}
+	m[unescapePointer(segs[len(segs)-1])] = v
+}
+
+func unescapePointer(s string) string {
+	return strings.NewReplacer("~1", "/", "~0", "~").Replace(s)
 }
 
 // N components in order (RFC 6350 §6.2.2, RFC 9554 §2.2).
@@ -380,12 +555,18 @@ func (b *builder) unknownProp(p *ical.Prop) {
 	for _, prm := range p.Params {
 		params[strings.ToLower(prm.Name)] = paramValue(prm.Values)
 	}
-	typ := "unknown"
+	// The value stays raw (still escaped) unless it is declared text, so
+	// structured values like CLIENTPIDMAP's survive a round trip.
+	typ, val := "unknown", p.Value
 	if v := p.Param("VALUE"); v != "" {
 		typ = strings.ToLower(v)
 		delete(params, "value")
+		if typ == "text" {
+			val = p.Text()
+		}
 	}
-	b.unknown = append(b.unknown, []any{strings.ToLower(p.Name), params, typ, ical.UnescapeText(p.Value)})
+	b.unknown = append(b.unknown, []any{strings.ToLower(p.Name), params, typ, val})
+	b.whole("vCardProps")
 }
 
 // label returns the Apple label of p's group and marks it as used.

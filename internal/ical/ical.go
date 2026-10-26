@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -27,6 +28,30 @@ type Prop struct {
 	Name   string // upper-cased
 	Params []Param
 	Value  string // raw, still escaped
+
+	orig *origLine // as parsed; Encode writes it back while the Prop is unchanged
+}
+
+// origLine is a parsed line's text (with its original folding) and a
+// snapshot of the fields parsed from it.
+type origLine struct {
+	text               string
+	group, name, value string
+	params             []Param
+}
+
+// unchanged reports whether p still has the fields it was parsed with.
+func (p *Prop) unchanged() bool {
+	o := p.orig
+	if o == nil || p.Group != o.group || p.Name != o.name || p.Value != o.value || len(p.Params) != len(o.params) {
+		return false
+	}
+	for i, pa := range p.Params {
+		if pa.Name != o.params[i].Name || !slices.Equal(pa.Values, o.params[i].Values) {
+			return false
+		}
+	}
+	return true
 }
 
 // Component is a BEGIN/END block.
@@ -79,6 +104,7 @@ func ParseAll(r io.Reader) ([]*Component, error) {
 		if err != nil {
 			return nil, fmt.Errorf("line %d: %w", n, err)
 		}
+		p.orig = &origLine{text: lr.raw, group: p.Group, name: p.Name, value: p.Value, params: cloneParams(p.Params)}
 		switch p.Name {
 		case "BEGIN":
 			stack = append(stack, &Component{Name: strings.ToUpper(p.Value)})
@@ -113,6 +139,7 @@ type lineReader struct {
 	pending string
 	havePen bool
 	lineNo  int
+	raw     string // the physical lines of the last logical line, CRLF-joined
 }
 
 func newLineReader(r io.Reader) *lineReader { return &lineReader{br: bufio.NewReader(r)} }
@@ -150,8 +177,9 @@ func (l *lineReader) next() (string, int, error) {
 		return "", 0, err
 	}
 	start := l.lineNo
-	var sb strings.Builder
+	var sb, raw strings.Builder
 	sb.WriteString(first)
+	raw.WriteString(first)
 	for {
 		nxt, err := l.physical()
 		if err == io.EOF {
@@ -165,11 +193,14 @@ func (l *lineReader) next() (string, int, error) {
 				return "", 0, fmt.Errorf("%w: line too long", ErrSyntax)
 			}
 			sb.WriteString(nxt[1:])
+			raw.WriteString("\r\n")
+			raw.WriteString(nxt)
 			continue
 		}
 		l.pending, l.havePen = nxt, true
 		break
 	}
+	l.raw = raw.String()
 	return sb.String(), start, nil
 }
 
@@ -283,7 +314,12 @@ func (c *Component) Bytes() []byte {
 func (c *Component) encode(w *bufio.Writer) {
 	writeFolded(w, "BEGIN:"+c.Name)
 	for _, p := range c.Props {
-		writeFolded(w, p.line())
+		if p.unchanged() {
+			w.WriteString(p.orig.text)
+			w.WriteString("\r\n")
+		} else {
+			writeFolded(w, p.line())
+		}
 	}
 	for _, ch := range c.Children {
 		ch.encode(w)
@@ -342,6 +378,14 @@ func writeFolded(w *bufio.Writer, s string) {
 		first = false
 	}
 	w.WriteString("\r\n")
+}
+
+func cloneParams(ps []Param) []Param {
+	out := make([]Param, len(ps))
+	for i, pa := range ps {
+		out[i] = Param{Name: pa.Name, Values: slices.Clone(pa.Values)}
+	}
+	return out
 }
 
 // Prop returns the first property with the given name, or nil.

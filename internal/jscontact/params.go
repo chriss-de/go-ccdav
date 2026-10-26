@@ -41,6 +41,13 @@ func newParams(p *ical.Prop) *params {
 					pp.pref = n
 				}
 			}
+		case "x-pref":
+			// Version 3 has only TYPE=pref; Merge keeps the rank here.
+			if len(vals) > 0 && pp.pref == 0 {
+				if n, err := strconv.Atoi(vals[0]); err == nil && n >= 1 && n <= 100 {
+					pp.pref = n
+				}
+			}
 		case "value":
 			if len(vals) > 0 {
 				pp.value = strings.ToLower(vals[0])
@@ -101,6 +108,20 @@ func (pp *params) takeFirstType() string {
 	t := pp.types[0]
 	pp.types = pp.types[1:]
 	return t
+}
+
+// takeService removes and returns the first TYPE value that names a
+// service (Apple's X-SOCIALPROFILE;type=twitter), not a context.
+func (pp *params) takeService() string {
+	for i, t := range pp.types {
+		switch t {
+		case "home", "work", "other", "internet":
+			continue
+		}
+		pp.types = slices.Delete(pp.types, i, i+1)
+		return t
+	}
+	return ""
 }
 
 var telFeatures = map[string]string{

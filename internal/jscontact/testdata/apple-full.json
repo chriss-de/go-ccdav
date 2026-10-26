@@ -46,6 +46,17 @@
         "year": 1980
       },
       "kind": "birth"
+    },
+    "k2": {
+      "@type": "Anniversary",
+      "date": {
+        "@type": "PartialDate",
+        "day": 1,
+        "month": 6,
+        "year": 2005
+      },
+      "kind": "wedding",
+      "pref": 1
     }
   },
   "emails": {
@@ -219,27 +230,10 @@
       "us"
     ],
     [
-      "x-abdate",
-      {
-        "group": "item5",
-        "type": "pref"
-      },
-      "unknown",
-      "2005-06-01"
-    ],
-    [
       "x-phonetic-first-name",
       {},
       "unknown",
       "Jon"
-    ],
-    [
-      "x-ablabel",
-      {
-        "group": "item5"
-      },
-      "unknown",
-      "_$!\u003cAnniversary\u003e!$_"
     ]
   ],
   "version": "1.0"

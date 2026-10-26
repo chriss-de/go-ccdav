@@ -1,0 +1,13 @@
+BEGIN:VCARD
+VERSION:4.0
+UID:new-1
+PRODID:-//ccdav//JMAP//EN
+FN:Ada Lovelace
+N:Lovelace;Ada;;;
+BDAY;PROP-ID=b:--1210
+EMAIL;TYPE=work;PREF=1;PROP-ID=e1:ada@example.com
+CATEGORIES:math
+item1.TEL;TYPE=cell;PROP-ID=p1:+44 20 1234
+item1.X-ABLABEL:Office
+REV:XXX
+END:VCARD

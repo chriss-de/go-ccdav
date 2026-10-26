@@ -84,7 +84,7 @@ func (c *Collection) SetShares(shares []Share) error {
 		return err
 	}
 	c.meta = m
-	return nil
+	return c.acct.noteCollection(c)
 }
 
 // refreshMeta re-reads .meta.json; the caller holds the write lock.
@@ -143,7 +143,8 @@ func (s *Store) All() []*Collection {
 }
 
 // ReloadMeta re-reads .meta.json of all loaded collections (after the CLI
-// changed shares) and loads collections created since startup.
+// changed shares), loads collections created since startup and, when
+// tracking accounts, reconciles the account logs.
 func (s *Store) ReloadMeta() error {
 	if err := s.LoadAll(); err != nil {
 		return err
@@ -156,6 +157,7 @@ func (s *Store) ReloadMeta() error {
 		}
 		c.mu.Unlock()
 	}
+	errs = append(errs, s.Reconcile())
 	return errors.Join(errs...)
 }
 
@@ -167,6 +169,7 @@ type SharePrefs struct {
 	Color       string `json:"color,omitempty"`
 	Order       string `json:"order,omitempty"`
 	Hidden      bool   `json:"hidden,omitempty"`
+	Invisible   bool   `json:"invisible,omitempty"` // JMAP isVisible=false
 	Version     uint64 `json:"version,omitempty"`
 }
 
@@ -242,5 +245,9 @@ func (s *Store) UpdateSharePrefs(user, key string, fn func(*SharePrefs)) error {
 		return err
 	}
 	s.prefs.users[user] = next
+	if owner, kind, ok := strings.Cut(key, "/"); ok {
+		kind, _, _ = strings.Cut(kind, "/")
+		s.changed(owner, Kind(kind))
+	}
 	return nil
 }

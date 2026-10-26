@@ -1,0 +1,51 @@
+{
+  "@type": "Card",
+  "emails": {
+    "e1": {
+      "@type": "EmailAddress",
+      "address": "jane@acme.example",
+      "contexts": {
+        "work": true
+      },
+      "label": "Work",
+      "pref": 1
+    }
+  },
+  "name": {
+    "@type": "Name",
+    "components": [
+      {
+        "@type": "NameComponent",
+        "kind": "surname",
+        "value": "Doe"
+      },
+      {
+        "@type": "NameComponent",
+        "kind": "given",
+        "value": "Jane"
+      }
+    ],
+    "full": "Jane Doe"
+  },
+  "organizations": {
+    "o1": {
+      "@type": "Organization",
+      "name": "ACME, Inc."
+    }
+  },
+  "phones": {
+    "p1": {
+      "@type": "Phone",
+      "features": {
+        "mobile": true,
+        "voice": true
+      },
+      "number": "+49 170 1234567",
+      "pref": 1
+    }
+  },
+  "prodId": "-//Apple Inc.//iPhone OS 18.0//EN",
+  "uid": "F1A2B3C4-0000-4000-8000-000000000001",
+  "updated": "2026-10-23T20:00:00Z",
+  "version": "1.0"
+}

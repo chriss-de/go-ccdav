@@ -1,0 +1,22 @@
+{
+  "@type": "Event",
+  "duration": "PT1H",
+  "prodId": "-//test//EN",
+  "recurrenceOverrides": {
+    "2025-01-01T10:00:00": {},
+    "2025-01-03T08:00:00": {
+      "duration": "PT15M"
+    },
+    "2025-01-05T12:00:00": {
+      "duration": "PT6H"
+    },
+    "2025-01-10T10:00:00": {
+      "excluded": true
+    }
+  },
+  "start": "2025-01-01T10:00:00",
+  "timeZone": "Etc/UTC",
+  "title": "Irregular",
+  "uid": "rdate@example.com",
+  "version": "2.0"
+}

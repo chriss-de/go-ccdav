@@ -120,3 +120,20 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+func TestEncodeKeepsUnchangedLines(t *testing.T) {
+	in := "BEGIN:VCARD\r\nVERSION:3.0\r\nNOTE:folded at an\r\n  odd place\r\nitem1.EMAIL;type=INTERNET:a@example.com\r\nFN:Old\r\nEND:VCARD\r\n"
+	c, err := ParseBytes([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(c.Bytes()); got != in {
+		t.Fatalf("round trip changed bytes:\n%q", got)
+	}
+	c.Prop("FN").Value = "New"
+	c.Prop("EMAIL").SetParam("TYPE", "INTERNET", "HOME")
+	want := "BEGIN:VCARD\r\nVERSION:3.0\r\nNOTE:folded at an\r\n  odd place\r\nitem1.EMAIL;TYPE=INTERNET,HOME:a@example.com\r\nFN:New\r\nEND:VCARD\r\n"
+	if got := string(c.Bytes()); got != want {
+		t.Fatalf("got\n%q\nwant\n%q", got, want)
+	}
+}

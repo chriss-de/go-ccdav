@@ -1,0 +1,14 @@
+{
+  "@type": "Event",
+  "duration": "P1D",
+  "prodId": "-//Google Inc//Google Calendar 70.9054//EN",
+  "recurrenceRule": {
+    "@type": "RecurrenceRule",
+    "frequency": "yearly"
+  },
+  "showWithoutTime": true,
+  "start": "2000-02-29T00:00:00",
+  "title": "Leap day birthday",
+  "uid": "leap-birthday@example.com",
+  "version": "2.0"
+}

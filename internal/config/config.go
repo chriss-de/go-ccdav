@@ -59,6 +59,10 @@ type Config struct {
 	// a relative path relative to the config file and defaults it to the
 	// file's directory. Changing it needs a restart.
 	DataDir string `yaml:"data_dir,omitempty"`
+	// JMAP turns on the JMAP API under JMAPPrefix and /.well-known/jmap.
+	// Both need a restart.
+	JMAP       bool   `yaml:"jmap,omitempty"`
+	JMAPPrefix string `yaml:"jmap_prefix,omitempty"`
 	// BaseURL is the public URL behind the reverse proxy, used for links in
 	// emails (RSVP). DAV hrefs are host-relative and don't need it.
 	BaseURL string              `yaml:"base_url,omitempty"`
@@ -83,8 +87,9 @@ var userRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 func ValidUserName(name string) bool { return userRe.MatchString(name) && name != "groups" }
 
 const (
-	DefaultDAVPrefix = "/dav/"
-	DefaultUIPrefix  = "/ui/"
+	DefaultDAVPrefix  = "/dav/"
+	DefaultUIPrefix   = "/ui/"
+	DefaultJMAPPrefix = "/jmap/"
 )
 
 var prefixRe = regexp.MustCompile(`^(/[a-zA-Z0-9._-]+)+/$`)
@@ -118,8 +123,20 @@ func Load(path string) (*Config, error) {
 	if c.UIPrefix, err = normPrefix(c.UIPrefix, DefaultUIPrefix); err != nil {
 		return nil, fmt.Errorf("%s: ui_prefix: %w", path, err)
 	}
-	if strings.HasPrefix(c.DAVPrefix, c.UIPrefix) || strings.HasPrefix(c.UIPrefix, c.DAVPrefix) {
-		return nil, fmt.Errorf("%s: dav_prefix %q and ui_prefix %q must not overlap", path, c.DAVPrefix, c.UIPrefix)
+	if c.JMAPPrefix, err = normPrefix(c.JMAPPrefix, DefaultJMAPPrefix); err != nil {
+		return nil, fmt.Errorf("%s: jmap_prefix: %w", path, err)
+	}
+	type prefix struct{ key, val string }
+	prefixes := []prefix{{"dav_prefix", c.DAVPrefix}, {"ui_prefix", c.UIPrefix}}
+	if c.JMAP {
+		prefixes = append(prefixes, prefix{"jmap_prefix", c.JMAPPrefix})
+	}
+	for i, a := range prefixes {
+		for _, b := range prefixes[i+1:] {
+			if strings.HasPrefix(a.val, b.val) || strings.HasPrefix(b.val, a.val) {
+				return nil, fmt.Errorf("%s: %s %q and %s %q must not overlap", path, a.key, a.val, b.key, b.val)
+			}
+		}
 	}
 	if o := c.OIDC; o != nil {
 		if o.Issuer == "" || o.ClientID == "" {
@@ -190,18 +207,27 @@ func NewStore(path string) (*Store, error) {
 	return s, s.Reload()
 }
 
-// Reload re-reads the file. A changed dav_prefix, ui_prefix or data_dir is
-// rejected (the old config stays active) because those need a restart.
+// Reload re-reads the file. A changed dav_prefix, ui_prefix, data_dir,
+// jmap or jmap_prefix is rejected (the old config stays active) because
+// those need a restart.
 func (s *Store) Reload() error {
 	c, err := Load(s.path)
 	if err != nil {
 		return err
 	}
-	if old := s.cur.Load(); old != nil && (old.DAVPrefix != c.DAVPrefix || old.UIPrefix != c.UIPrefix || old.DataDir != c.DataDir) {
-		return fmt.Errorf("%s: changing dav_prefix, ui_prefix or data_dir requires a restart", s.path)
+	if old := s.cur.Load(); old != nil && (old.DAVPrefix != c.DAVPrefix || old.UIPrefix != c.UIPrefix || old.DataDir != c.DataDir ||
+		old.JMAP != c.JMAP || old.JMAPPrefix != c.JMAPPrefix) {
+		return fmt.Errorf("%s: changing dav_prefix, ui_prefix, data_dir, jmap or jmap_prefix requires a restart", s.path)
 	}
 	s.cur.Store(c)
 	return nil
+}
+
+// Password returns a user's config.yaml password hash ("" if none) and
+// whether the user exists in the current config.
+func (s *Store) Password(user string) (string, bool) {
+	u, ok := s.Get().Users[user]
+	return u.Password, ok
 }
 
 // UserByLogin maps an OIDC claim value to a configured user: by name

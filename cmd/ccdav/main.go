@@ -29,6 +29,7 @@ import (
 	"github.com/chriss-de/go-ccdav/internal/auth"
 	"github.com/chriss-de/go-ccdav/internal/config"
 	"github.com/chriss-de/go-ccdav/internal/directory"
+	"github.com/chriss-de/go-ccdav/internal/jmap"
 	"github.com/chriss-de/go-ccdav/internal/server"
 	"github.com/chriss-de/go-ccdav/internal/store"
 	"github.com/chriss-de/go-ccdav/internal/trace"
@@ -111,6 +112,9 @@ func run() error {
 	}
 	dataDir := dataDirOf(*dataFlag, cfg.Get())
 	st := store.New(dataDir, server.UIDOf)
+	if cfg.Get().JMAP {
+		st.TrackAccounts()
+	}
 	// Load everything up front: listing a user's home must know about
 	// collections other users shared with them.
 	if err := st.LoadAll(); err != nil {
@@ -118,6 +122,11 @@ func run() error {
 	}
 	if err := directory.Sync(cfg.Get(), st, server.DefaultAddressBooks); err != nil {
 		log.Error("directory address books", "err", err)
+	}
+	// Catch up the JMAP account logs with changes made while they were
+	// off; a no-op without JMAP.
+	if err := st.Reconcile(); err != nil {
+		return err
 	}
 	key, err := web.LoadOrCreateKey(filepath.Join(dataDir, "session.key"))
 	if err != nil {
@@ -134,6 +143,12 @@ func run() error {
 	ui := web.New(cfg, st, appPass, limiter, key, defaults, log)
 	mux.Handle(cfg.Get().UIPrefix, ui)
 	mux.HandleFunc("GET /{$}", ui.Landing) // exactly "/"; other methods (PROPFIND) fall through to DAV
+	var jh *jmap.Handler
+	if cfg.Get().JMAP {
+		jh = jmap.New(cfg, st, dataDir, appPass, limiter, defaults, log)
+		mux.Handle(cfg.Get().JMAPPrefix, jh)
+		mux.Handle("/.well-known/jmap", jh)
+	}
 	var dav http.Handler = server.New(cfg, st, appPass, limiter, log)
 	if *traceDir != "" {
 		if dav, err = trace.Handler(*traceDir, dav, log); err != nil {
@@ -151,6 +166,9 @@ func run() error {
 		WriteTimeout:      2 * time.Minute,
 		IdleTimeout:       2 * time.Minute,
 		ErrorLog:          slog.NewLogLogger(h, slog.LevelWarn),
+	}
+	if jh != nil {
+		srv.RegisterOnShutdown(jh.Close) // push streams would hold up the shutdown
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -171,13 +189,16 @@ func run() error {
 			if err := directory.Sync(cfg.Get(), st, server.DefaultAddressBooks); err != nil {
 				log.Error("directory address books", "err", err)
 			}
+			if jh != nil {
+				jh.Changed() // groups decide who sees which account
+			}
 		}
 	}()
 
 	errc := make(chan error, 1)
 	go func() {
 		log.Info("listening", "addr", *listen, "data", dataDir, "config", cfgPath,
-			"dav_prefix", cfg.Get().DAVPrefix, "ui_prefix", cfg.Get().UIPrefix, "version", version)
+			"dav_prefix", cfg.Get().DAVPrefix, "ui_prefix", cfg.Get().UIPrefix, "jmap", cfg.Get().JMAP, "version", version)
 		errc <- srv.ListenAndServe()
 	}()
 	select {

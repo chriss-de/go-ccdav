@@ -1,0 +1,10 @@
+BEGIN:VCARD
+VERSION:4.0
+PRODID:-//Thunderbird//NONSGML//EN
+UID:6c0e3e64-91c5-4b47-9d4c-7e9d1d3a8b11
+FN:Erika Musterfrau
+N:Musterfrau;Erika;;;
+EMAIL;PREF=1:erika@example.net
+TEL;VALUE=TEXT;TYPE=work:+49 89 987654
+NOTE:Line one\nLine two
+END:VCARD

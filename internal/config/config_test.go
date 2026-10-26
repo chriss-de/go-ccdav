@@ -77,6 +77,8 @@ func TestPrefixes(t *testing.T) {
 		"dav_prefix: /a b/\n",
 		"dav_prefix: /x/\nui_prefix: /x/\n",
 		"dav_prefix: /dav/\nui_prefix: /dav/ui/\n",
+		"jmap: true\njmap_prefix: /ui/\n",
+		"jmap: true\njmap_prefix: /dav/jmap/\n",
 		"users:\n  groups:\n    password: x\n",
 		"users: {}\ngroups:\n  Bad: []\n",
 	} {
@@ -92,6 +94,14 @@ func TestPrefixes(t *testing.T) {
 	write(t, dir, "config.yaml", "dav_prefix: /other/\n")
 	if err := st.Reload(); err == nil || st.Get().DAVPrefix != "/dav/" {
 		t.Fatal("prefix change on reload must be rejected", err)
+	}
+	write(t, dir, "config.yaml", "jmap: true\n")
+	if err := st.Reload(); err == nil || st.Get().JMAP {
+		t.Fatal("jmap change on reload must be rejected", err)
+	}
+	c, err = Load(write(t, dir, "config.yaml", "jmap: true\n"))
+	if err != nil || c.JMAPPrefix != "/jmap/" {
+		t.Fatal(c, err)
 	}
 }
 

@@ -47,26 +47,35 @@ const (
 )
 
 type Handler struct {
-	prefix  string // fixed for the server's lifetime
-	cfg     *config.Store
-	store   *store.Store
-	basic   *auth.Basic
-	blobs   blobStore
-	log     *slog.Logger
-	caps    map[string]any // capability URI -> session capability object
-	methods map[string]method
-	busy    sync.Map // user -> chan struct{}: API request slots
-	uploads sync.Map // user -> chan struct{}: upload slots
+	prefix   string // fixed for the server's lifetime
+	cfg      *config.Store
+	store    *store.Store
+	defaults map[store.Kind]map[string]store.Meta // created in a new home
+	basic    *auth.Basic
+	blobs    blobStore
+	conv     convCache
+	log      *slog.Logger
+	caps     map[string]capability
+	methods  map[string]method
+	busy     sync.Map // user -> chan struct{}: API request slots
+	uploads  sync.Map // user -> chan struct{}: upload slots
+}
+
+type capability struct {
+	session any               // in the session's capabilities
+	account func(account) any // in each account's accountCapabilities; nil: not an account capability
 }
 
 // New creates the JMAP handler. ap and lim are shared with DAV and the
-// web UI. The store must track accounts.
-func New(cfg *config.Store, st *store.Store, dataDir string, ap *auth.AppPasswords, lim *auth.Limiter, log *slog.Logger) *Handler {
+// web UI; defaults are the collections a new home starts with, as for
+// DAV. The store must track accounts.
+func New(cfg *config.Store, st *store.Store, dataDir string, ap *auth.AppPasswords, lim *auth.Limiter,
+	defaults map[store.Kind]map[string]store.Meta, log *slog.Logger) *Handler {
 	h := &Handler{
-		prefix: cfg.Get().JMAPPrefix, cfg: cfg, store: st,
+		prefix: cfg.Get().JMAPPrefix, cfg: cfg, store: st, defaults: defaults,
 		basic: auth.NewBasic(cfg.Password, ap, lim, log, "jmap"),
 		blobs: blobStore{root: dataDir}, log: log,
-		caps: map[string]any{CapCore: coreCapability{
+		caps: map[string]capability{CapCore: {session: coreCapability{
 			MaxSizeUpload:         maxSizeUpload,
 			MaxConcurrentUpload:   maxConcurrentUpload,
 			MaxSizeRequest:        maxSizeRequest,
@@ -74,11 +83,12 @@ func New(cfg *config.Store, st *store.Store, dataDir string, ap *auth.AppPasswor
 			MaxCallsInRequest:     maxCallsInRequest,
 			MaxObjectsInGet:       MaxObjectsInGet,
 			MaxObjectsInSet:       MaxObjectsInSet,
-			CollationAlgorithms:   []string{},
-		}},
+			CollationAlgorithms:   collations,
+		}}},
 		methods: map[string]method{},
 	}
 	h.Register("Core/echo", CapCore, echo)
+	h.registerContacts()
 	return h
 }
 
@@ -109,8 +119,12 @@ func (h *Handler) Register(name, capability string, fn MethodFunc) {
 	h.methods[name] = method{capability, fn}
 }
 
-// AddCapability announces a capability in the session object.
-func (h *Handler) AddCapability(uri string, v any) { h.caps[uri] = v }
+// AddCapability announces a capability in the session object. With
+// perAccount set, it is also an account capability, with the value
+// perAccount returns for each account.
+func (h *Handler) AddCapability(uri string, session any, perAccount func(account) any) {
+	h.caps[uri] = capability{session, perAccount}
+}
 
 type statusWriter struct {
 	http.ResponseWriter

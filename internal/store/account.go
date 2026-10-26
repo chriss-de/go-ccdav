@@ -16,20 +16,23 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // The account log (.jmap.log in a home, users/<owner>/<kind>/) records
 // every change to the owner's collections and objects of one kind. It
 // gives them stable ids and answers JMAP /changes. Lines:
 //
-//	HOME <hex>                                              identity of this log
-//	FLOOR <token>                                           older tokens are invalid
-//	<token> SET C <id> <born> 0 - <hash> -                  collection created or changed
-//	<token> SET O <id> <born> <moved> <coll> <hash> <name>  object created, changed or moved
-//	<token> DEL C|O <id> <born> <moved> <coll> - -
+//	HOME <hex>                                                   identity of this log
+//	FLOOR <token>                                                older tokens are invalid
+//	<token> SET C <id> <born> <at> 0 - <hash> -                  collection created or changed
+//	<token> SET O <id> <born> <at> <moved> <coll> <hash> <name>  object created, changed or moved
+//	<token> DEL C|O <id> <born> <at> <moved> <coll> - -
 //
-// born is the token the id was created at, moved the token of its last
-// move (0: never). Every line carries both, so compaction loses neither.
+// born is the token the id was created at and at the time (Unix seconds;
+// for objects that existed before they were first logged, the file's
+// modification time). moved is the token of the last move (0: never).
+// Every line carries all three, so compaction loses none.
 // coll is the id of the object's collection. hash is the object's ETag or
 // a hash of the collection's properties; noting an unchanged hash does
 // nothing, which makes Reconcile idempotent.
@@ -50,6 +53,7 @@ const (
 
 type acctEntry struct {
 	Token, Born, Moved uint64
+	BornAt             int64 // Unix seconds
 	Level              Level
 	ID, Coll, Hash     string
 	Name               string
@@ -67,30 +71,31 @@ func (e acctEntry) line() string {
 	if name == "" {
 		name = "-"
 	}
-	return fmt.Sprintf("%d %s %c %s %d %d %s %s %s\n", e.Token, op, e.Level, e.ID, e.Born, e.Moved, coll, hash, name)
+	return fmt.Sprintf("%d %s %c %s %d %d %d %s %s %s\n", e.Token, op, e.Level, e.ID, e.Born, e.BornAt, e.Moved, coll, hash, name)
 }
 
 func parseAcctLine(s string) (acctEntry, bool) {
-	f := strings.SplitN(s, " ", 9)
-	if len(f) != 9 || len(f[2]) != 1 || f[2] != "C" && f[2] != "O" || f[1] != "SET" && f[1] != "DEL" {
+	f := strings.SplitN(s, " ", 10)
+	if len(f) != 10 || len(f[2]) != 1 || f[2] != "C" && f[2] != "O" || f[1] != "SET" && f[1] != "DEL" {
 		return acctEntry{}, false
 	}
 	var e acctEntry
-	var err1, err2, err3 error
+	var err1, err2, err3, err4 error
 	e.Token, err1 = strconv.ParseUint(f[0], 10, 64)
 	e.Born, err2 = strconv.ParseUint(f[4], 10, 64)
-	e.Moved, err3 = strconv.ParseUint(f[5], 10, 64)
-	if err1 != nil || err2 != nil || err3 != nil {
+	e.BornAt, err3 = strconv.ParseInt(f[5], 10, 64)
+	e.Moved, err4 = strconv.ParseUint(f[6], 10, 64)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
 		return acctEntry{}, false
 	}
 	e.Level, e.ID, e.Deleted = Level(f[2][0]), f[3], f[1] == "DEL"
-	if f[6] != "-" {
-		e.Coll = f[6]
+	if f[7] != "-" {
+		e.Coll = f[7]
 	}
 	if !e.Deleted {
-		e.Hash = f[7]
+		e.Hash = f[8]
 		if e.Level == LevelObjects {
-			e.Name = f[8]
+			e.Name = f[9]
 		}
 	}
 	return e, true
@@ -352,9 +357,9 @@ func (a *Account) noteCollection(c *Collection) error {
 	if ok && !old.Deleted && old.Hash == hash {
 		return nil
 	}
-	e := acctEntry{Level: LevelCollections, ID: id, Hash: hash}
+	e := acctEntry{Level: LevelCollections, ID: id, Hash: hash, BornAt: time.Now().Unix()}
 	if ok && !old.Deleted {
-		e.Born = old.Born
+		e.Born, e.BornAt = old.Born, old.BornAt
 	}
 	return a.append(e)
 }
@@ -368,13 +373,13 @@ func (a *Account) noteObject(c *Collection, o ObjectInfo) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	coll, hash := c.id(), strings.Trim(o.ETag, `"`)
-	e := acctEntry{Level: LevelObjects, Coll: coll, Name: o.Name, Hash: hash}
+	e := acctEntry{Level: LevelObjects, Coll: coll, Name: o.Name, Hash: hash, BornAt: o.ModTime.Unix()}
 	if id, ok := a.byLoc[coll+"/"+o.Name]; ok {
 		old := a.cur[string(LevelObjects)+id]
 		if old.Hash == hash {
 			return nil
 		}
-		e.ID, e.Born, e.Moved = id, old.Born, old.Moved
+		e.ID, e.Born, e.BornAt, e.Moved = id, old.Born, old.BornAt, old.Moved
 	} else {
 		e.ID = a.newObjectID()
 	}
@@ -389,10 +394,10 @@ func (a *Account) noteMove(from *Collection, name string, to *Collection, o Obje
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	e := acctEntry{Level: LevelObjects, Coll: to.id(), Name: o.Name, Hash: strings.Trim(o.ETag, `"`)}
+	e := acctEntry{Level: LevelObjects, Coll: to.id(), Name: o.Name, Hash: strings.Trim(o.ETag, `"`), BornAt: o.ModTime.Unix()}
 	if id, ok := a.byLoc[from.id()+"/"+name]; ok {
 		old := a.cur[string(LevelObjects)+id]
-		e.ID, e.Born = id, old.Born
+		e.ID, e.Born, e.BornAt = id, old.Born, old.BornAt
 		e.Moved = a.token + 1
 	} else {
 		e.ID = a.newObjectID()
@@ -419,7 +424,7 @@ func (a *Account) deleteLoc(coll, name string) error {
 		return nil
 	}
 	old := a.cur[string(LevelObjects)+id]
-	return a.append(acctEntry{Level: LevelObjects, ID: id, Born: old.Born, Moved: old.Moved, Coll: coll, Deleted: true})
+	return a.append(acctEntry{Level: LevelObjects, ID: id, Born: old.Born, BornAt: old.BornAt, Moved: old.Moved, Coll: coll, Deleted: true})
 }
 
 // noteCollectionDeleted logs the deletion of c and all its objects. The
@@ -452,7 +457,7 @@ func (a *Account) deleteCollection(id string) error {
 	if !ok || old.Deleted {
 		return nil
 	}
-	return a.append(acctEntry{Level: LevelCollections, ID: id, Born: old.Born, Deleted: true})
+	return a.append(acctEntry{Level: LevelCollections, ID: id, Born: old.Born, BornAt: old.BornAt, Deleted: true})
 }
 
 // State returns the log's identity and the newest token of a level. A
@@ -522,24 +527,40 @@ func lastTokenBefore(log []acctEntry, i int, l Level) uint64 {
 	return 0
 }
 
-// Lookup returns the collection id and name of a live object.
-func (a *Account) Lookup(id string) (coll, name string, ok bool) {
+// ObjectRef locates a live object of an account.
+type ObjectRef struct {
+	ID, Coll, Name string
+	Created        time.Time
+}
+
+// Lookup returns the live object with the given id.
+func (a *Account) Lookup(id string) (ObjectRef, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	e, ok := a.cur[string(LevelObjects)+id]
 	if !ok || e.Deleted {
-		return "", "", false
+		return ObjectRef{}, false
 	}
-	return e.Coll, e.Name, true
+	return ObjectRef{ID: id, Coll: e.Coll, Name: e.Name, Created: time.Unix(e.BornAt, 0).UTC()}, true
 }
 
-// ObjectID returns the id of an object of c.
-func (a *Account) ObjectID(c *Collection, name string) (string, bool) {
+// ObjectAt returns the object stored as name in c.
+func (a *Account) ObjectAt(c *Collection, name string) (ObjectRef, bool) {
 	coll := c.ID()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	id, ok := a.byLoc[coll+"/"+name]
-	return id, ok
+	if !ok {
+		return ObjectRef{}, false
+	}
+	e := a.cur[string(LevelObjects)+id]
+	return ObjectRef{ID: id, Coll: coll, Name: name, Created: time.Unix(e.BornAt, 0).UTC()}, true
+}
+
+// ObjectID returns the id of an object of c.
+func (a *Account) ObjectID(c *Collection, name string) (string, bool) {
+	r, ok := a.ObjectAt(c, name)
+	return r.ID, ok
 }
 
 // TrackAccounts turns on the account logs. Call it before any collection

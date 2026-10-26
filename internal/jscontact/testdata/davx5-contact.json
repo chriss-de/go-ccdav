@@ -1,0 +1,43 @@
+{
+  "@type": "Card",
+  "emails": {
+    "e1": {
+      "@type": "EmailAddress",
+      "address": "max@example.org",
+      "contexts": {
+        "private": true
+      }
+    }
+  },
+  "keywords": {
+    "Friends": true,
+    "Sport": true
+  },
+  "name": {
+    "@type": "Name",
+    "components": [
+      {
+        "@type": "NameComponent",
+        "kind": "surname",
+        "value": "Mustermann"
+      },
+      {
+        "@type": "NameComponent",
+        "kind": "given",
+        "value": "Max"
+      }
+    ],
+    "full": "Max Mustermann"
+  },
+  "phones": {
+    "p1": {
+      "@type": "Phone",
+      "label": "Büro",
+      "number": "+49 30 123456"
+    }
+  },
+  "prodId": "+//IDN bitfire.at//DAVx5/4.5.21-ose ez-vcard/0.12.1",
+  "uid": "3b8e1c1e-7f0e-4f3e-9b55-2a1f9c0d1e2f",
+  "updated": "2026-10-23T20:00:00Z",
+  "version": "1.0"
+}

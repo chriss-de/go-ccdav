@@ -74,8 +74,12 @@ func newEnv(t testing.TB) *env {
 	if err := st.Reconcile(); err != nil {
 		t.Fatal(err)
 	}
-	h := New(cs, st, dir, auth.NewAppPasswords(dir), auth.NewLimiter(), slog.New(slog.NewTextHandler(io.Discard, nil)))
-	h.AddCapability(capTest, struct{}{})
+	defaults := map[store.Kind]map[string]store.Meta{
+		store.Calendars:    {"personal": {DisplayName: "Personal"}},
+		store.AddressBooks: {"contacts": {DisplayName: "Contacts"}},
+	}
+	h := New(cs, st, dir, auth.NewAppPasswords(dir), auth.NewLimiter(), defaults, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h.AddCapability(capTest, struct{}{}, func(account) any { return struct{}{} })
 	h.Register("Test/fixed", capTest, func(*Call, json.RawMessage) (any, error) {
 		return json.RawMessage(`{"list":[{"id":"1","tags":["a","b"]},{"id":"2","tags":["c"]}],"ids":["x","y"],"n":3}`), nil
 	})
@@ -138,7 +142,7 @@ func decode[T any](t testing.TB, resp *http.Response) T {
 // responses as [name, args, id] with decoded args.
 func (e *env) api(user string, calls ...any) []apiResp {
 	e.t.Helper()
-	body, _ := json.Marshal(map[string]any{"using": []string{CapCore, capTest}, "methodCalls": calls})
+	body, _ := json.Marshal(map[string]any{"using": []string{CapCore, capTest, CapContacts}, "methodCalls": calls})
 	resp := e.do(user, "POST", "/jmap/api", "application/json", body)
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)

@@ -30,7 +30,7 @@ Not implemented yet: scheduling/iMIP and RSVP links. The design is in [`ccdav-de
 | [6868](https://www.rfc-editor.org/rfc/rfc6868) | Parameter value encoding | |
 | [7636](https://www.rfc-editor.org/rfc/rfc7636) | PKCE | OIDC login of the web UI |
 
-**JMAP:** in progress, off by default (`jmap: true`). The [core protocol](https://www.rfc-editor.org/rfc/rfc8620) works: session, API requests with result references, and blob upload/download. Data types are still missing; [Contacts](https://www.rfc-editor.org/rfc/rfc9610) comes next, then [Calendars](https://datatracker.ietf.org/doc/draft-ietf-jmap-calendars/). Push is not implemented yet. App passwords work for JMAP as they do for DAV.
+**JMAP:** in progress, off by default (`jmap: true`). The [core protocol](https://www.rfc-editor.org/rfc/rfc8620) works: session, API requests with result references, and blob upload/download. [Contacts](https://www.rfc-editor.org/rfc/rfc9610) are read-only so far: `AddressBook/get` and `/changes`, and `ContactCard/get`, `/changes` and `/query`. vCards stay the stored format and are converted to [JSContact](https://www.rfc-editor.org/rfc/rfc9553) on the fly ([RFC 9555](https://www.rfc-editor.org/rfc/rfc9555)), so DAV clients are unaffected. Not yet: writing, push, sharing via `shareWith`, and [Calendars](https://datatracker.ietf.org/doc/draft-ietf-jmap-calendars/). App passwords work for JMAP as they do for DAV.
 
 ## Quick start
 

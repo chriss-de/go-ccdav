@@ -1,0 +1,47 @@
+{
+  "@type": "Card",
+  "emails": {
+    "e1": {
+      "@type": "EmailAddress",
+      "address": "erika@example.net",
+      "pref": 1
+    }
+  },
+  "name": {
+    "@type": "Name",
+    "components": [
+      {
+        "@type": "NameComponent",
+        "kind": "surname",
+        "value": "Musterfrau"
+      },
+      {
+        "@type": "NameComponent",
+        "kind": "given",
+        "value": "Erika"
+      }
+    ],
+    "full": "Erika Musterfrau"
+  },
+  "notes": {
+    "n1": {
+      "@type": "Note",
+      "note": "Line one\nLine two"
+    }
+  },
+  "phones": {
+    "p1": {
+      "@type": "Phone",
+      "contexts": {
+        "work": true
+      },
+      "number": "+49 89 987654",
+      "vCardParams": {
+        "value": "text"
+      }
+    }
+  },
+  "prodId": "-//Thunderbird//NONSGML//EN",
+  "uid": "6c0e3e64-91c5-4b47-9d4c-7e9d1d3a8b11",
+  "version": "1.0"
+}

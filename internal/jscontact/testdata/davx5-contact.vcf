@@ -1,0 +1,12 @@
+BEGIN:VCARD
+VERSION:3.0
+PRODID:+//IDN bitfire.at//DAVx5/4.5.21-ose ez-vcard/0.12.1
+UID:3b8e1c1e-7f0e-4f3e-9b55-2a1f9c0d1e2f
+FN:Max Mustermann
+N:Mustermann;Max;;;
+item1.TEL:+49 30 123456
+item1.X-ABLabel:Büro
+EMAIL;TYPE=HOME:max@example.org
+CATEGORIES:Friends,Sport
+REV:20261023T200000Z
+END:VCARD

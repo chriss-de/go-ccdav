@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func newTracked(t *testing.T, root string) *Store {
@@ -106,11 +107,11 @@ func TestAccountIDsAndChanges(t *testing.T) {
 	if got := objChanges(t, a, t1); got != want {
 		t.Fatalf("changes %q, want %q", got, want)
 	}
-	if _, _, ok := a.Lookup(ix); ok {
+	if _, ok := a.Lookup(ix); ok {
 		t.Fatal("deleted id still found")
 	}
-	if coll, name, ok := a.Lookup(ia); !ok || coll != c.ID() || name != "a" {
-		t.Fatal("lookup", coll, name, ok)
+	if r, ok := a.Lookup(ia); !ok || r.Coll != c.ID() || r.Name != "a" || time.Since(r.Created) > time.Minute {
+		t.Fatal("lookup", r, ok)
 	}
 
 	// Writing an unchanged object again is not a change.
@@ -222,6 +223,12 @@ func TestAccountRestartAndReconcile(t *testing.T) {
 	if objID(t, a, c, "a") != ia {
 		t.Fatal("id lost on restart")
 	}
+	r1, _ := a.Lookup(ia)
+	put(t, c, "a")
+	if r2, _ := a.Lookup(ia); !r2.Created.Equal(r1.Created) {
+		t.Fatal("update changed the creation time")
+	}
+	_, tok = a.State(LevelObjects)
 	if h, t2 := a.State(LevelObjects); h != home || t2 != tok {
 		t.Fatal("state changed on restart", h, t2)
 	}
@@ -238,10 +245,15 @@ func TestAccountRestartAndReconcile(t *testing.T) {
 	gone, _ := u.CreateCollection("alice", Calendars, "gone", Meta{})
 	put(t, gone, "z")
 
+	old := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	os.Chtimes(filepath.Join(root, "users/alice/calendars/cal/d"), old, old)
 	s = newTracked(t, root)
 	a = acct(t, s)
 	c, _ = s.Collection("alice", Calendars, "cal")
 	ic, id := objID(t, a, c, "c"), objID(t, a, c, "d")
+	if r, _ := a.Lookup(id); !r.Created.Equal(old) {
+		t.Fatalf("reconciled object created %v, want the file time %v", r.Created, old)
+	}
 	g, _ := s.Collection("alice", Calendars, "gone")
 	iz := objID(t, a, g, "z")
 	got := objChanges(t, a, tok)

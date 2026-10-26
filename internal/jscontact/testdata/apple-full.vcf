@@ -1,0 +1,31 @@
+BEGIN:VCARD
+VERSION:3.0
+PRODID:-//Apple Inc.//iPhone OS 18.0//EN
+N:Appleseed;John;Q.;Dr.;Jr.,MD
+FN:Dr. John Q. Appleseed Jr.
+NICKNAME:Johnny,JA
+ORG:Apple\, Inc.;Engineering;Calendars
+TITLE:Engineer
+item1.EMAIL;type=INTERNET;type=HOME;type=pref:john@home.example
+item2.EMAIL;type=INTERNET:john@other.example
+item2.X-ABLabel:Club
+TEL;type=WORK;type=VOICE:+1 408 555 0100
+TEL;type=IPHONE;type=CELL;type=VOICE;type=pref:+1 408 555 0101
+TEL;type=HOME;type=FAX:+1 408 555 0102
+item3.ADR;type=HOME;type=pref:;;1 Infinite Loop;Cupertino;CA;95014;United States
+item3.X-ABADR:us
+item4.URL;type=pref:https\://www.example.com/john
+item4.X-ABLabel:_$!<HomePage>!$_
+X-SOCIALPROFILE;type=twitter;x-user=jappleseed:https://twitter.com/jappleseed
+IMPP;X-SERVICE-TYPE=Skype;type=HOME;type=pref:skype:john.appleseed
+BDAY:1980-04-15
+item5.X-ABDATE;type=pref:2005-06-01
+item5.X-ABLabel:_$!<Anniversary>!$_
+NOTE:Met at WWDC\, 2019.\nLikes apples.
+CATEGORIES:Work,VIP
+PHOTO;ENCODING=b;TYPE=JPEG:/9j/4AAQSkZJRgAB
+ AQAAAQABAAD
+X-PHONETIC-FIRST-NAME:Jon
+REV:2026-10-23T20:00:00Z
+UID:A1B2C3D4-0000-4000-8000-000000000002
+END:VCARD

@@ -1,0 +1,233 @@
+{
+  "@type": "Card",
+  "addresses": {
+    "a1": {
+      "@type": "Address",
+      "components": [
+        {
+          "@type": "AddressComponent",
+          "kind": "apartment",
+          "value": "Suite D2-630"
+        },
+        {
+          "@type": "AddressComponent",
+          "kind": "name",
+          "value": "2875 Laurier"
+        },
+        {
+          "@type": "AddressComponent",
+          "kind": "locality",
+          "value": "Quebec"
+        },
+        {
+          "@type": "AddressComponent",
+          "kind": "region",
+          "value": "QC"
+        },
+        {
+          "@type": "AddressComponent",
+          "kind": "postcode",
+          "value": "G1V 2M2"
+        },
+        {
+          "@type": "AddressComponent",
+          "kind": "country",
+          "value": "Canada"
+        }
+      ],
+      "contexts": {
+        "work": true
+      },
+      "full": "2875 boul. Laurier, suite D2-630\nQuebec, QC G1V 2M2"
+    },
+    "a2": {
+      "@type": "Address",
+      "contexts": {
+        "work": true
+      },
+      "coordinates": "geo:46.772673,-71.282945"
+    },
+    "a3": {
+      "@type": "Address",
+      "timeZone": "Etc/GMT+5"
+    }
+  },
+  "anniversaries": {
+    "k1": {
+      "@type": "Anniversary",
+      "date": {
+        "@type": "PartialDate",
+        "day": 3,
+        "month": 2
+      },
+      "kind": "birth"
+    },
+    "k2": {
+      "@type": "Anniversary",
+      "date": {
+        "@type": "Timestamp",
+        "utc": "2009-08-08T19:30:00Z"
+      },
+      "kind": "wedding"
+    }
+  },
+  "calendars": {
+    "c1": {
+      "@type": "Calendar",
+      "kind": "calendar",
+      "uri": "https://cal.example/simon"
+    },
+    "c2": {
+      "@type": "Calendar",
+      "kind": "freeBusy",
+      "mediaType": "text/calendar",
+      "uri": "https://cal.example/simon/fb"
+    }
+  },
+  "cryptoKeys": {
+    "k1": {
+      "@type": "CryptoKey",
+      "contexts": {
+        "work": true
+      },
+      "uri": "http://www.viagenie.ca/simon.perreault/simon.asc",
+      "vCardParams": {
+        "value": "uri"
+      }
+    }
+  },
+  "emails": {
+    "e1": {
+      "@type": "EmailAddress",
+      "address": "simon.perreault@viagenie.ca",
+      "contexts": {
+        "work": true
+      }
+    }
+  },
+  "kind": "individual",
+  "links": {
+    "l1": {
+      "@type": "Link",
+      "contexts": {
+        "private": true
+      },
+      "uri": "http://nomis80.org"
+    }
+  },
+  "members": {
+    "urn:uuid:03a0e51f-d1aa-4385-8a53-e29025acd8af": true
+  },
+  "name": {
+    "@type": "Name",
+    "components": [
+      {
+        "@type": "NameComponent",
+        "kind": "surname",
+        "value": "Perreault"
+      },
+      {
+        "@type": "NameComponent",
+        "kind": "given",
+        "value": "Simon"
+      },
+      {
+        "@type": "NameComponent",
+        "kind": "credential",
+        "value": "ing. jr"
+      },
+      {
+        "@type": "NameComponent",
+        "kind": "credential",
+        "value": "M.Sc."
+      }
+    ],
+    "full": "Simon Perreault"
+  },
+  "onlineServices": {
+    "s1": {
+      "@type": "OnlineService",
+      "service": "Mastodon",
+      "uri": "https://example.social/@simon"
+    }
+  },
+  "organizations": {
+    "o1": {
+      "@type": "Organization",
+      "contexts": {
+        "work": true
+      },
+      "name": "Viagenie"
+    }
+  },
+  "phones": {
+    "p1": {
+      "@type": "Phone",
+      "contexts": {
+        "work": true
+      },
+      "features": {
+        "voice": true
+      },
+      "number": "tel:+1-418-656-9254;ext=102",
+      "pref": 1,
+      "vCardParams": {
+        "value": "uri"
+      }
+    },
+    "p2": {
+      "@type": "Phone",
+      "contexts": {
+        "work": true
+      },
+      "features": {
+        "mobile": true,
+        "text": true,
+        "video": true,
+        "voice": true
+      },
+      "number": "tel:+1-418-262-6501",
+      "vCardParams": {
+        "value": "uri"
+      }
+    }
+  },
+  "preferredLanguages": {
+    "l1": {
+      "@type": "LanguagePref",
+      "language": "fr",
+      "pref": 1
+    },
+    "l2": {
+      "@type": "LanguagePref",
+      "language": "en",
+      "pref": 2
+    }
+  },
+  "relatedTo": {
+    "urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6": {
+      "@type": "Relation",
+      "relation": {
+        "colleague": true,
+        "friend": true
+      }
+    }
+  },
+  "uid": "urn:uuid:4fbe8971-0bc3-424c-9c26-36c3e1eff6b1",
+  "updated": "2026-10-24T08:15:00Z",
+  "vCardProps": [
+    [
+      "gender",
+      {},
+      "unknown",
+      "M"
+    ],
+    [
+      "clientpidmap",
+      {},
+      "unknown",
+      "1;urn:uuid:3df403f4-5924-4bb7-b077-3c711d9eb34b"
+    ]
+  ],
+  "version": "1.0"
+}

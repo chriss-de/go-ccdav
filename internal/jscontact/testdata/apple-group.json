@@ -1,0 +1,22 @@
+{
+  "@type": "Card",
+  "kind": "group",
+  "members": {
+    "F1A2B3C4-0000-4000-8000-000000000001": true
+  },
+  "name": {
+    "@type": "Name",
+    "components": [
+      {
+        "@type": "NameComponent",
+        "kind": "surname",
+        "value": "Family"
+      }
+    ],
+    "full": "Family"
+  },
+  "prodId": "-//Apple Inc.//iPhone OS 18.0//EN",
+  "uid": "F1A2B3C4-0000-4000-8000-0000000000aa",
+  "updated": "2026-10-23T20:00:00Z",
+  "version": "1.0"
+}

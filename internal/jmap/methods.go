@@ -19,12 +19,15 @@ import (
 // shared with the user.
 type View struct {
 	AccountID string
+	User      string // the caller
 	Owner     string
 	Own       bool
 	Kind      store.Kind
 	Log       *store.Account
 	Colls     map[string]*store.Collection // collection id -> collection
 	Access    map[string]string            // collection id -> store access
+
+	st *store.Store
 }
 
 // View resolves an accountId argument. accountNotFound if the user can't
@@ -34,11 +37,17 @@ func (c *Call) View(accountID string, kind store.Kind) (*View, error) {
 	if !ok {
 		return nil, Errorf(ErrAccountNotFound, "no account %q", accountID)
 	}
+	if a.personal {
+		// As in DAV, a home starts with its default collections.
+		if err := c.h.store.EnsureHome(a.owner, kind, c.h.defaults[kind]); err != nil {
+			return nil, err
+		}
+	}
 	log, err := c.h.store.Account(a.owner, kind)
 	if err != nil {
 		return nil, err
 	}
-	v := &View{AccountID: accountID, Owner: a.owner, Own: a.personal, Kind: kind, Log: log,
+	v := &View{st: c.h.store, AccountID: accountID, User: c.User, Owner: a.owner, Own: a.personal, Kind: kind, Log: log,
 		Colls: map[string]*store.Collection{}, Access: map[string]string{}}
 	groups := c.h.cfg.Get().GroupsOf(c.User)
 	for _, col := range c.h.store.All() {
@@ -53,41 +62,46 @@ func (c *Call) View(accountID string, kind store.Kind) (*View, error) {
 	return v, nil
 }
 
-// accessTag is part of every state string of a shared account: it
-// changes whenever the set of shared collections or the user's access
-// to them changes, which /changes can't express. For the owner's own
-// account it is constant.
-func (v *View) accessTag() string {
+// tag is part of every state string of a shared account, for what the
+// log can't express: it changes whenever the set of shared collections
+// or the user's access to them changes, and for collections also when
+// the user's own settings for them (name, order, hidden) change. In the
+// owner's account it is constant.
+func (v *View) tag(l store.Level) string {
 	if v.Own {
 		return "o"
 	}
 	sum := sha256.New()
 	for _, id := range slices.Sorted(maps.Keys(v.Access)) {
-		fmt.Fprintf(sum, "%s:%s\n", id, v.Access[id])
+		fmt.Fprintf(sum, "%s:%s", id, v.Access[id])
+		if l == store.LevelCollections {
+			fmt.Fprintf(sum, ":%d", v.st.SharePrefs(v.User, v.Colls[id].Key()).Version)
+		}
+		sum.Write([]byte{'\n'})
 	}
 	return hex.EncodeToString(sum.Sum(nil)[:4])
 }
 
-// State is the JMAP state string of a level: "<home>-<token>-<access>".
+// State is the JMAP state string of a level: "<home>-<token>-<tag>".
 func (v *View) State(l store.Level) string {
 	home, tok := v.Log.State(l)
-	return v.state(home, tok)
+	return v.state(l, home, tok)
 }
 
-func (v *View) state(home string, tok uint64) string {
-	return home + "-" + strconv.FormatUint(tok, 10) + "-" + v.accessTag()
+func (v *View) state(l store.Level, home string, tok uint64) string {
+	return home + "-" + strconv.FormatUint(tok, 10) + "-" + v.tag(l)
 }
 
 // token parses a state string of this view; ok is false if it belongs to
-// another log or another set of shared collections.
-func (v *View) token(state string) (uint64, bool) {
+// another log or the tag changed.
+func (v *View) token(l store.Level, state string) (uint64, bool) {
 	parts := strings.Split(state, "-")
 	if len(parts) != 3 {
 		return 0, false
 	}
-	home, _ := v.Log.State(store.LevelObjects)
+	home, _ := v.Log.State(l)
 	tok, err := strconv.ParseUint(parts[1], 10, 64)
-	if err != nil || parts[0] != home || parts[2] != v.accessTag() {
+	if err != nil || parts[0] != home || parts[2] != v.tag(l) {
 		return 0, false
 	}
 	return tok, true
@@ -126,7 +140,7 @@ func (c *Call) Changes(raw json.RawMessage, kind store.Kind, l store.Level) (*Ch
 	if err != nil {
 		return nil, err
 	}
-	since, ok := v.token(args.SinceState)
+	since, ok := v.token(l, args.SinceState)
 	if !ok {
 		return nil, Errorf(ErrCannotCalculateChanges, "unknown state")
 	}
@@ -142,7 +156,7 @@ func (c *Call) Changes(raw json.RawMessage, kind store.Kind, l store.Level) (*Ch
 		return nil, err
 	}
 	home, _ := v.Log.State(l)
-	resp := &ChangesResponse{AccountID: args.AccountID, OldState: args.SinceState, NewState: v.state(home, next),
+	resp := &ChangesResponse{AccountID: args.AccountID, OldState: args.SinceState, NewState: v.state(l, home, next),
 		HasMoreChanges: more, Created: []string{}, Updated: []string{}, Destroyed: []string{}}
 	for _, ch := range changes {
 		if !v.Own {

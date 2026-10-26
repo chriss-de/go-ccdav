@@ -144,7 +144,7 @@ func run() error {
 	mux.Handle(cfg.Get().UIPrefix, ui)
 	mux.HandleFunc("GET /{$}", ui.Landing) // exactly "/"; other methods (PROPFIND) fall through to DAV
 	if cfg.Get().JMAP {
-		jh := jmap.New(cfg, st, dataDir, appPass, limiter, log)
+		jh := jmap.New(cfg, st, dataDir, appPass, limiter, defaults, log)
 		mux.Handle(cfg.Get().JMAPPrefix, jh)
 		mux.Handle("/.well-known/jmap", jh)
 	}

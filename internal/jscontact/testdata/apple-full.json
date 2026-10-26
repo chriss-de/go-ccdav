@@ -1,0 +1,246 @@
+{
+  "@type": "Card",
+  "addresses": {
+    "a1": {
+      "@type": "Address",
+      "components": [
+        {
+          "@type": "AddressComponent",
+          "kind": "name",
+          "value": "1 Infinite Loop"
+        },
+        {
+          "@type": "AddressComponent",
+          "kind": "locality",
+          "value": "Cupertino"
+        },
+        {
+          "@type": "AddressComponent",
+          "kind": "region",
+          "value": "CA"
+        },
+        {
+          "@type": "AddressComponent",
+          "kind": "postcode",
+          "value": "95014"
+        },
+        {
+          "@type": "AddressComponent",
+          "kind": "country",
+          "value": "United States"
+        }
+      ],
+      "contexts": {
+        "private": true
+      },
+      "pref": 1
+    }
+  },
+  "anniversaries": {
+    "k1": {
+      "@type": "Anniversary",
+      "date": {
+        "@type": "PartialDate",
+        "day": 15,
+        "month": 4,
+        "year": 1980
+      },
+      "kind": "birth"
+    }
+  },
+  "emails": {
+    "e1": {
+      "@type": "EmailAddress",
+      "address": "john@home.example",
+      "contexts": {
+        "private": true
+      },
+      "pref": 1
+    },
+    "e2": {
+      "@type": "EmailAddress",
+      "address": "john@other.example",
+      "label": "Club"
+    }
+  },
+  "keywords": {
+    "VIP": true,
+    "Work": true
+  },
+  "links": {
+    "l1": {
+      "@type": "Link",
+      "label": "HomePage",
+      "pref": 1,
+      "uri": "https://www.example.com/john"
+    }
+  },
+  "media": {
+    "m1": {
+      "@type": "Media",
+      "kind": "photo",
+      "mediaType": "image/jpeg",
+      "uri": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD"
+    }
+  },
+  "name": {
+    "@type": "Name",
+    "components": [
+      {
+        "@type": "NameComponent",
+        "kind": "surname",
+        "value": "Appleseed"
+      },
+      {
+        "@type": "NameComponent",
+        "kind": "given",
+        "value": "John"
+      },
+      {
+        "@type": "NameComponent",
+        "kind": "given2",
+        "value": "Q."
+      },
+      {
+        "@type": "NameComponent",
+        "kind": "title",
+        "value": "Dr."
+      },
+      {
+        "@type": "NameComponent",
+        "kind": "credential",
+        "value": "Jr."
+      },
+      {
+        "@type": "NameComponent",
+        "kind": "credential",
+        "value": "MD"
+      }
+    ],
+    "full": "Dr. John Q. Appleseed Jr."
+  },
+  "nicknames": {
+    "n1": {
+      "@type": "Nickname",
+      "name": "Johnny"
+    },
+    "n2": {
+      "@type": "Nickname",
+      "name": "JA"
+    }
+  },
+  "notes": {
+    "n1": {
+      "@type": "Note",
+      "note": "Met at WWDC, 2019.\nLikes apples."
+    }
+  },
+  "onlineServices": {
+    "s1": {
+      "@type": "OnlineService",
+      "service": "twitter",
+      "uri": "https://twitter.com/jappleseed",
+      "user": "jappleseed"
+    },
+    "s2": {
+      "@type": "OnlineService",
+      "contexts": {
+        "private": true
+      },
+      "pref": 1,
+      "service": "Skype",
+      "uri": "skype:john.appleseed"
+    }
+  },
+  "organizations": {
+    "o1": {
+      "@type": "Organization",
+      "name": "Apple, Inc.",
+      "units": [
+        {
+          "@type": "OrgUnit",
+          "name": "Engineering"
+        },
+        {
+          "@type": "OrgUnit",
+          "name": "Calendars"
+        }
+      ]
+    }
+  },
+  "phones": {
+    "p1": {
+      "@type": "Phone",
+      "contexts": {
+        "work": true
+      },
+      "features": {
+        "voice": true
+      },
+      "number": "+1 408 555 0100"
+    },
+    "p2": {
+      "@type": "Phone",
+      "features": {
+        "mobile": true,
+        "voice": true
+      },
+      "number": "+1 408 555 0101",
+      "pref": 1
+    },
+    "p3": {
+      "@type": "Phone",
+      "contexts": {
+        "private": true
+      },
+      "features": {
+        "fax": true
+      },
+      "number": "+1 408 555 0102"
+    }
+  },
+  "prodId": "-//Apple Inc.//iPhone OS 18.0//EN",
+  "titles": {
+    "t1": {
+      "@type": "Title",
+      "kind": "title",
+      "name": "Engineer"
+    }
+  },
+  "uid": "A1B2C3D4-0000-4000-8000-000000000002",
+  "updated": "2026-10-23T20:00:00Z",
+  "vCardProps": [
+    [
+      "x-abadr",
+      {
+        "group": "item3"
+      },
+      "unknown",
+      "us"
+    ],
+    [
+      "x-abdate",
+      {
+        "group": "item5",
+        "type": "pref"
+      },
+      "unknown",
+      "2005-06-01"
+    ],
+    [
+      "x-phonetic-first-name",
+      {},
+      "unknown",
+      "Jon"
+    ],
+    [
+      "x-ablabel",
+      {
+        "group": "item5"
+      },
+      "unknown",
+      "_$!\u003cAnniversary\u003e!$_"
+    ]
+  ],
+  "version": "1.0"
+}

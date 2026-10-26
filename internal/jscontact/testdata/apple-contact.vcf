@@ -1,0 +1,12 @@
+BEGIN:VCARD
+VERSION:3.0
+PRODID:-//Apple Inc.//iPhone OS 18.0//EN
+N:Doe;Jane;;;
+FN:Jane Doe
+ORG:ACME\, Inc.;
+item1.EMAIL;type=INTERNET;type=WORK;type=pref:jane@acme.example
+item1.X-ABLabel:_$!<Work>!$_
+TEL;type=CELL;type=VOICE;type=pref:+49 170 1234567
+REV:2026-10-23T20:00:00Z
+UID:F1A2B3C4-0000-4000-8000-000000000001
+END:VCARD

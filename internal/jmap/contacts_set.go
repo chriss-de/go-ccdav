@@ -115,6 +115,9 @@ func (c *Call) storeCard(v *View, col *store.Collection, name string, card *ical
 		id, _ := v.Log.ObjectID(col, dup.Existing)
 		return &setErr{SetError{Type: SetAlreadyExists, Description: "the UID is in use", ExistingID: id}}
 	}
+	if errors.Is(err, store.ErrQuota) {
+		return failSet(SetOverQuota, "the owner's storage quota is used up")
+	}
 	return err
 }
 

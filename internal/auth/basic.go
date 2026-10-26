@@ -42,7 +42,7 @@ func (b *Basic) Authenticate(w http.ResponseWriter, r *http.Request, ip string) 
 		// Clients first ask without credentials; only wrong ones count.
 		if hasAuth {
 			b.limit.Fail(ip, name)
-			b.log.Warn(b.label+" login failed", "user", name, "ip", ip)
+			b.log.Warn(b.label+" login failed", "user", ClipName(name), "ip", ip)
 		}
 		w.Header().Set("WWW-Authenticate", `Basic realm="ccdav", charset="UTF-8"`)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -63,11 +63,18 @@ func (b *Basic) check(r *http.Request) (string, bool) {
 	}
 	if !ok || hash == "" {
 		// Burn comparable time so user enumeration via timing is harder.
-		Verify("pbkdf2-sha256$600000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", pw)
+		VerifyNone(pw)
 		return "", false
 	}
-	// The config.yaml password stays as a fallback.
+	// The config.yaml password stays as a fallback, unless guessed at
+	// from too many places.
+	if b.limit.AccountPaused(name) {
+		VerifyNone(pw)
+		b.log.Warn(b.label+" password logins paused after too many failures", "user", name)
+		return "", false
+	}
 	if !b.cache.Verify(name, hash, pw) {
+		b.limit.FailAccount(name)
 		return "", false
 	}
 	return name, true

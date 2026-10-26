@@ -142,14 +142,38 @@ func (u *UI) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		fail("Login failed.", "reason", "userinfo", "err", err)
 		return
 	}
-	login, _ := info[c.OIDC.UsernameClaim].(string)
-	user, ok := c.UserByLogin(login)
+	user, ok := oidcUser(c, info)
 	if !ok {
-		fail("Your account is not allowed on this server.", "claim", c.OIDC.UsernameClaim, "value", login)
+		login, _ := info[c.OIDC.UsernameClaim].(string)
+		fail("Your account is not allowed on this server.", "claim", c.OIDC.UsernameClaim, "value", login,
+			"email_verified", info["email_verified"])
 		return
 	}
 	u.clearCookie(w, r, oidcCookie)
-	u.startSession(w, r, user)
+	if err := u.startSession(w, r, user); err != nil {
+		fail("Login failed.", "reason", "session", "err", err)
+		return
+	}
 	u.log.Info("login", "user", user, "via", "oidc")
 	http.Redirect(w, r, u.prefix, http.StatusSeeOther)
+}
+
+// oidcUser maps a login's userinfo to a configured user. With the email
+// claim it matches the users' emails, verified ones only; any other claim
+// must equal a user name. Crossing over would let whoever can set an IdP
+// username, or an unverified email, to someone's address log in as them.
+func oidcUser(c *config.Config, info map[string]any) (string, bool) {
+	v, _ := info[c.OIDC.UsernameClaim].(string)
+	if v == "" {
+		return "", false
+	}
+	if c.OIDC.UsernameClaim == "email" {
+		// Some IdPs send the flag as a string.
+		if verified := info["email_verified"]; verified != true && verified != "true" {
+			return "", false
+		}
+		return c.UserByEmail(v)
+	}
+	_, ok := c.Users[v]
+	return v, ok
 }

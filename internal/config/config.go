@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
@@ -82,6 +83,10 @@ type Config struct {
 	// Directory adds a generated, read-only address book with all users
 	// to every user's home (default on).
 	Directory *bool `yaml:"directory,omitempty"`
+	// Quota bounds the bytes of objects each user owns ("500MB", "2GB";
+	// empty: no limit). Load sets QuotaBytes.
+	Quota      string `yaml:"quota,omitempty"`
+	QuotaBytes int64  `yaml:"-"`
 }
 
 var userRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
@@ -166,6 +171,9 @@ func Load(path string) (*Config, error) {
 	if c.Trusted, err = clientip.ParsePrefixes(c.TrustedProxies); err != nil {
 		return nil, fmt.Errorf("%s: trusted_proxies: %w", path, err)
 	}
+	if c.QuotaBytes, err = parseSize(c.Quota); err != nil {
+		return nil, fmt.Errorf("%s: quota: %w", path, err)
+	}
 	for name := range c.Users {
 		if !ValidUserName(name) {
 			return nil, fmt.Errorf("%s: invalid user name %q", path, name)
@@ -182,6 +190,27 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	return &c, nil
+}
+
+// parseSize reads a size like "1048576", "500MB" or "1.5 GB" (KB, MB, GB
+// and TB are powers of 1024); "" is 0.
+func parseSize(v string) (int64, error) {
+	v = strings.ToUpper(strings.TrimSpace(v))
+	if v == "" {
+		return 0, nil
+	}
+	mult := int64(1)
+	for i, unit := range []string{"KB", "MB", "GB", "TB"} {
+		if n, ok := strings.CutSuffix(v, unit); ok {
+			v, mult = strings.TrimSpace(n), 1<<(10*(i+1))
+			break
+		}
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || !(f >= 0) || f*float64(mult) > 1<<62 { // !(f >= 0): NaN too
+		return 0, fmt.Errorf("not a size: %q", v)
+	}
+	return int64(f * float64(mult)), nil
 }
 
 // FileNames are tried in order by Find.
@@ -234,12 +263,9 @@ func (s *Store) Password(user string) (string, bool) {
 	return u.Password, ok
 }
 
-// UserByLogin maps an OIDC claim value to a configured user: by name
-// first, then by email (case-insensitive).
-func (c *Config) UserByLogin(v string) (string, bool) {
-	if _, ok := c.Users[v]; ok {
-		return v, true
-	}
+// UserByEmail maps an email address to the configured user that has it
+// (case-insensitive).
+func (c *Config) UserByEmail(v string) (string, bool) {
 	for name, u := range c.Users {
 		if u.Email != "" && strings.EqualFold(u.Email, v) {
 			return name, true

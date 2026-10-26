@@ -5,6 +5,7 @@
 package caldav
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -86,8 +87,8 @@ func UIDOf(data []byte) (uid, comp string) {
 		return c.Value("UID"), ""
 	}
 	for _, ch := range c.Children {
-		if ch.Name == "VTIMEZONE" {
-			continue
+		if ch.Name == "VTIMEZONE" || strings.HasPrefix(ch.Name, "X-") {
+			continue // as in Validate
 		}
 		if comp == "" {
 			comp = ch.Name
@@ -121,6 +122,16 @@ func ParseTimeRange(e *dav.Element) (from, to time.Time, err error) {
 type Query struct {
 	Filter   *dav.Element   // the CALDAV:filter element
 	Floating *time.Location // zone for floating times (calendar-timezone), nil = UTC
+	// Ctx stops recurrence expansion when done (nil: never); the caller
+	// must then treat results as incomplete.
+	Ctx context.Context
+}
+
+func (q *Query) ctx() context.Context {
+	if q.Ctx == nil {
+		return context.Background()
+	}
+	return q.Ctx
 }
 
 // ErrBadFilter is returned for malformed filters (→ 400 / valid-filter).
@@ -202,7 +213,7 @@ func (q *Query) overlaps(root, parent, c *ical.Component, from, to time.Time) bo
 			}
 			return false
 		}
-		for o := range rrule.Expand(root, c.Name, c.Value("UID"), from, to, q.Floating) {
+		for o := range rrule.ExpandContext(q.ctx(), root, c.Name, c.Value("UID"), from, to, q.Floating) {
 			if o.Comp == c {
 				return true
 			}
@@ -246,6 +257,21 @@ func (q *Query) todoNoStart(root, c *ical.Component, from, to time.Time) bool {
 	return true
 }
 
+// Bounds for alarm time-ranges: REPEAT and DURATION come from users, and
+// both widen the window searched and multiply the alarm times checked.
+const (
+	maxAlarmRepeat = 100
+	maxAlarmSpan   = 400 * 24 * time.Hour // alarm offsets beyond this don't match
+	maxAlarmChecks = 100_000              // alarm times checked per alarm
+)
+
+// spanOf is |d| as a time.Duration, at most maxAlarmSpan.
+func spanOf(d rrule.Duration) time.Duration {
+	days := min(max(d.Days, -d.Days), int(maxAlarmSpan/(24*time.Hour)))
+	clock := min(max(d.Clock, -d.Clock), maxAlarmSpan)
+	return min(time.Duration(days)*24*time.Hour+clock, maxAlarmSpan)
+}
+
 // alarmOverlaps checks whether any trigger of the alarm (for any instance
 // of its parent, including repeats) falls into [from, to).
 func (q *Query) alarmOverlaps(root, parent, alarm *ical.Component, from, to time.Time) bool {
@@ -256,10 +282,13 @@ func (q *Query) alarmOverlaps(root, parent, alarm *ical.Component, from, to time
 	repeat, gap := 0, rrule.Duration{}
 	if r := alarm.Value("REPEAT"); r != "" {
 		fmt.Sscanf(r, "%d", &repeat)
+		repeat = min(max(repeat, 0), maxAlarmRepeat)
 		gap, _ = rrule.ParseDuration(alarm.Value("DURATION"))
 	}
+	checks := maxAlarmChecks
 	fire := func(base time.Time) bool {
-		for i := 0; i <= repeat && i < 1000; i++ {
+		for i := 0; i <= repeat && checks > 0; i++ {
+			checks--
 			if !base.Before(from) && base.Before(to) {
 				return true
 			}
@@ -277,15 +306,11 @@ func (q *Query) alarmOverlaps(root, parent, alarm *ical.Component, from, to time
 	}
 	// Widen the window by the trigger offset so that instances whose alarm
 	// lands in range are found, then test each alarm time exactly.
-	span := time.Duration(d.Days)*24*time.Hour + d.Clock
-	if span < 0 {
-		span = -span
-	}
-	span += 48 * time.Hour
-	if repeat > 0 {
-		span += time.Duration(repeat) * (time.Duration(gap.Days)*24*time.Hour + gap.Clock)
-	}
-	for o := range rrule.Expand(root, parent.Name, parent.Value("UID"), from.Add(-span), to.Add(span), q.Floating) {
+	span := min(spanOf(d)+48*time.Hour+time.Duration(repeat)*spanOf(gap), maxAlarmSpan)
+	for o := range rrule.ExpandContext(q.ctx(), root, parent.Name, parent.Value("UID"), from.Add(-span), to.Add(span), q.Floating) {
+		if checks <= 0 {
+			return false
+		}
 		if o.Comp != parent {
 			continue
 		}

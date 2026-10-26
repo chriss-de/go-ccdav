@@ -5,6 +5,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -152,12 +154,44 @@ func TestLastUsedAndUILockout(t *testing.T) {
 
 	c := e.browser()
 	for range 10 {
-		c.expect("POST", "/ui/login", url.Values{"user": {"bob"}, "password": {"x"}}, http.StatusForbidden)
+		c.expect("POST", "/ui/login", c.loginForm("bob", "x"), http.StatusForbidden)
 	}
-	out = c.expect("POST", "/ui/login", url.Values{"user": {"bob"}, "password": {"pw"}}, http.StatusTooManyRequests)
+	out = c.expect("POST", "/ui/login", c.loginForm("bob", "pw"), http.StatusTooManyRequests)
 	contains(t, out, "Too many failed attempts")
 	// The shared limiter also blocks DAV for that IP and user.
 	if st := e.dav("PROPFIND", "/dav/", "bob", "pw"); st != http.StatusTooManyRequests {
 		t.Fatalf("DAV after UI lockout: %d", st)
 	}
+}
+
+// Collection keys are split into path segments; none may lead out of the
+// key owner's home.
+func TestCollectionKeyTraversal(t *testing.T) {
+	e := newEnv(t, nil)
+	if st := e.dav("PROPFIND", "/dav/calendars/bob/", "bob", "pw"); st != http.StatusMultiStatus {
+		t.Fatalf("bob's home: %d", st)
+	}
+	bobDir := filepath.Join(e.dir, "users", "bob")
+	a := e.browser()
+	a.login("alice")
+	for _, key := range []string{"alice/../bob", "alice/../../users", "../bob/calendars", "alice/./personal"} {
+		if resp, _ := a.do("GET", "/ui/export?key="+url.QueryEscape(key), nil); resp.StatusCode == http.StatusOK {
+			t.Errorf("export %q: %d", key, resp.StatusCode)
+		}
+		a.post("collections/delete", http.StatusBadRequest, "key", key, "confirm", "yes")
+	}
+	if _, err := os.Stat(bobDir); err != nil {
+		t.Fatalf("bob's data is gone: %v", err)
+	}
+}
+
+// An import that runs into the storage quota stops and says so, rather
+// than reporting the rest as skipped.
+func TestImportOverQuota(t *testing.T) {
+	e := newEnv(t, nil)
+	e.st.SetQuota(func() int64 { return 400 })
+	a := e.browser()
+	a.login("alice")
+	out := a.upload("alice/calendars/personal", "cal.ics", importIcs, http.StatusBadRequest)
+	contains(t, out, "quota")
 }

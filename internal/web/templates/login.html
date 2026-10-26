@@ -8,6 +8,7 @@
       <form method="get" action="{{.Prefix}}login"><button type="submit">Sign in with {{.Provider}}</button></form>
     {{else}}
       <form method="post" action="{{.Prefix}}login">
+        <input type="hidden" name="login" value="{{.Token}}">
         <label class="stack">User name<input type="text" name="user" autocomplete="username" required autofocus></label>
         <label class="stack">Password<input type="password" name="password" autocomplete="current-password" required></label>
         <button type="submit">Sign in</button>

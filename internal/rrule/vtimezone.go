@@ -13,7 +13,7 @@ import (
 // ("last Sunday of March at 01:00 UTC") become one observance with an
 // RRULE (with UNTIL if the rule ended); others are listed one by one.
 func VTimezone(name string, from time.Time) (*ical.Component, error) {
-	loc, err := time.LoadLocation(name)
+	loc, err := LoadZone(name)
 	if err != nil {
 		return nil, err
 	}

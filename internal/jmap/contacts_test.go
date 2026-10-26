@@ -281,3 +281,23 @@ func TestContactsShared(t *testing.T) {
 		t.Fatalf("owner view %+v", ab)
 	}
 }
+
+// Filter depth was limited, breadth not: each condition is checked against
+// every object, so a huge OR multiplied the cost of a query.
+func TestFilterSizeLimited(t *testing.T) {
+	e := newEnv(t)
+	conds := make([]any, maxFilterNodes)
+	for i := range conds {
+		conds[i] = map[string]any{"text": "x"}
+	}
+	r := e.api("alice", call("ContactCard/query", map[string]any{"accountId": e.alice,
+		"filter": map[string]any{"operator": "OR", "conditions": conds}}, "0"))[0]
+	if errType(r) != ErrUnsupportedFilter {
+		t.Fatalf("filter of %d nodes: %.200v", len(conds)+1, r)
+	}
+	r = e.api("alice", call("ContactCard/query", map[string]any{"accountId": e.alice,
+		"filter": map[string]any{"operator": "OR", "conditions": conds[:10]}}, "0"))[0]
+	if errType(r) != "" {
+		t.Fatalf("small filter: %.200v", r)
+	}
+}

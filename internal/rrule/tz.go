@@ -12,15 +12,22 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	_ "time/tzdata" // embedded IANA database: do not depend on the host
 
 	"github.com/chriss-de/go-ccdav/internal/ical"
 )
 
+// maxCachedZones bounds each zone cache: TZIDs and VTIMEZONEs come from
+// users, and every distinct one would otherwise stay forever.
+const maxCachedZones = 4096
+
 var (
 	namedCache sync.Map // tzid -> *time.Location (IANA / Windows / fixed)
 	vtzCache   sync.Map // tzid + "\x00" + sha256(VTIMEZONE) -> *time.Location
+	namedCount atomic.Int64
+	vtzCount   atomic.Int64
 	lowerWin   = sync.OnceValue(func() map[string]string {
 		m := make(map[string]string, len(windowsZones)+len(windowsDisplayZones))
 		for k, v := range windowsDisplayZones {
@@ -42,17 +49,18 @@ var (
 //  3. a VTIMEZONE in cal with that TZID, converted to a *time.Location;
 //  4. a fixed offset spelled like "UTC+01:00", "GMT-0500" or "Etc/GMT+1";
 //
-// and finally UTC with ok == false. Results are cached.
+// and finally UTC with ok == false. Results are cached. TZIDs longer than
+// maxTZID are not looked up.
 func LoadLocation(tzid string, cal *ical.Component) (loc *time.Location, ok bool) {
 	tzid = strings.TrimSpace(strings.Trim(tzid, `"`))
-	if tzid == "" {
+	if tzid == "" || len(tzid) > maxTZID {
 		return time.UTC, false
 	}
 	if v, hit := namedCache.Load(tzid); hit {
 		return v.(*time.Location), true
 	}
 	if loc := lookupNamed(tzid); loc != nil {
-		namedCache.Store(tzid, loc)
+		cache(&namedCache, &namedCount, tzid, loc)
 		return loc, true
 	}
 	if cal != nil {
@@ -66,28 +74,58 @@ func LoadLocation(tzid string, cal *ical.Component) (loc *time.Location, ok bool
 				return v.(*time.Location), true
 			}
 			if loc, err := LocationFromVTimezone(vtz); err == nil {
-				vtzCache.Store(key, loc)
+				cache(&vtzCache, &vtzCount, key, loc)
 				return loc, true
 			}
 		}
 	}
 	if loc := parseFixedZone(tzid); loc != nil {
-		namedCache.Store(tzid, loc)
+		cache(&namedCache, &namedCount, tzid, loc)
 		return loc, true
 	}
 	return time.UTC, false
+}
+
+// maxTZID is longer than any real TZID, vendor prefixes and Windows
+// display names included.
+const maxTZID = 256
+
+// cache stores loc, emptying the cache first when it is full.
+func cache(m *sync.Map, n *atomic.Int64, key string, loc *time.Location) {
+	if n.Add(1) > maxCachedZones {
+		m.Clear()
+		n.Store(1)
+	}
+	m.Store(key, loc)
+}
+
+// LoadZone is time.LoadLocation for names that come from users: "Local"
+// would be the server's own zone, and "" UTC under another name.
+func LoadZone(name string) (*time.Location, error) {
+	if name == "" || name == "Local" {
+		return nil, fmt.Errorf("%w: time zone %q", ErrValue, name)
+	}
+	return time.LoadLocation(name)
 }
 
 func lookupNamed(tzid string) *time.Location {
 	if loc := loadIANA(tzid); loc != nil {
 		return loc
 	}
-	// Vendor prefixes: try every suffix of the slash separated path.
-	parts := strings.Split(strings.Trim(tzid, "/"), "/")
-	for i := range parts {
-		if loc := loadIANA(strings.Join(parts[i:], "/")); loc != nil {
-			return loc
+	// Vendor prefixes: try every suffix of the slash separated path that
+	// could be an IANA name (loadIANA takes at most 64 bytes).
+	name := strings.Trim(tzid, "/")
+	for {
+		if len(name) <= 64 {
+			if loc := loadIANA(name); loc != nil {
+				return loc
+			}
 		}
+		i := strings.IndexByte(name, '/')
+		if i < 0 {
+			break
+		}
+		name = name[i+1:]
 	}
 	if name, ok := windowsZones[tzid]; ok {
 		return loadIANA(name)
@@ -189,7 +227,14 @@ type transition struct {
 func LocationFromVTimezone(vtz *ical.Component) (*time.Location, error) {
 	tzid := strings.TrimSpace(vtz.Value("TZID"))
 	var trans []transition
+	// The transitions of all observances count against one budget: many
+	// small observances must not add up to an unbounded slice.
+	tooMany := false
+	work := newBudget() // shared by the observances' rules
 	for _, obs := range vtz.Children {
+		if tooMany {
+			break
+		}
 		if obs.Name != "STANDARD" && obs.Name != "DAYLIGHT" {
 			continue
 		}
@@ -209,6 +254,10 @@ func LocationFromVTimezone(vtz *ical.Component) (*time.Location, error) {
 		add := func(local time.Time) {
 			// local holds wall-clock fields (in UTC) in the "from" offset.
 			if local.Year() < vtzFirstYear || local.Year() > vtzLastYear {
+				return
+			}
+			if len(trans) >= vtzMaxTransitions {
+				tooMany = true
 				return
 			}
 			trans = append(trans, transition{at: local.Unix() - int64(from), offset: to, isDST: isDST, abbr: abbr})
@@ -244,8 +293,8 @@ func LocationFromVTimezone(vtz *ical.Component) (*time.Location, error) {
 			}
 			rr.Until, rr.UntilUTC, rr.UntilIsDate = time.Time{}, false, false
 			n := 0
-			for t := range rr.Iter(local) {
-				if t.Year() > vtzLastYear || n > vtzMaxTransitions {
+			for t := range rr.iter(local, work) {
+				if t.Year() > vtzLastYear || n > vtzMaxTransitions || tooMany {
 					break
 				}
 				if hasUntil {
@@ -267,6 +316,9 @@ func LocationFromVTimezone(vtz *ical.Component) (*time.Location, error) {
 				continue
 			}
 			for _, s := range starts {
+				if tooMany {
+					break
+				}
 				t := s.Time
 				if !s.Floating {
 					t = t.Add(time.Duration(from) * time.Second)
@@ -275,13 +327,13 @@ func LocationFromVTimezone(vtz *ical.Component) (*time.Location, error) {
 			}
 		}
 	}
+	if tooMany {
+		return nil, fmt.Errorf("%w: VTIMEZONE %q has more than %d transitions", ErrValue, tzid, vtzMaxTransitions)
+	}
 	if len(trans) == 0 {
 		return nil, fmt.Errorf("%w: VTIMEZONE %q has no usable observance", ErrValue, tzid)
 	}
 	slices.SortStableFunc(trans, func(a, b transition) int { return cmp.Compare(a.at, b.at) })
-	if len(trans) > vtzMaxTransitions {
-		trans = trans[:vtzMaxTransitions]
-	}
 	// The zone before the first transition: the first observance's
 	// TZOFFSETFROM is unknown here, so use the earliest standard offset.
 	initial := trans[0]

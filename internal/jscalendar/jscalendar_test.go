@@ -6,9 +6,12 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/chriss-de/go-ccdav/internal/ical"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden .json files")
@@ -80,5 +83,39 @@ func TestWallDurationAcrossDST(t *testing.T) {
 	e, _ := Codec{}.ToJMAP([]byte(raw))
 	if e["duration"] != "PT3H" {
 		t.Fatal(e["duration"])
+	}
+}
+
+// A deep JSPROP pointer or value made the event unmarshalable, which broke
+// every JMAP get that included it.
+func TestDeepJSPropDropped(t *testing.T) {
+	for _, prop := range []string{
+		"JSPROP;JSPTR=" + strings.Repeat("a/", 20000) + "b:1",
+		"JSPROP;JSPTR=x:" + strings.Repeat("[", 9990) + strings.Repeat("]", 9990),
+		"JSPROP;JSPTR=" + strings.Repeat("a/", 15) + "b:" + strings.Repeat("[", 9990) + strings.Repeat("]", 9990),
+	} {
+		cal, err := ical.ParseBytes([]byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:u\r\nDTSTART:20260101T000000Z\r\nSUMMARY:s\r\n" +
+			prop + "\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		e, err := FromICal(cal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := json.Marshal(e); err != nil {
+			t.Errorf("%.40s...: %v", prop, err)
+		}
+		if e["title"] != "s" {
+			t.Errorf("title %v", e["title"])
+		}
+	}
+}
+
+// "Local" is the server's own zone, not an IANA name a client may use.
+func TestLocalZoneRejected(t *testing.T) {
+	e := map[string]any{"@type": "Event", "start": "2026-01-01T10:00:00", "timeZone": "Local", "duration": "PT1H"}
+	if bad := Validate(e); !slices.Contains(bad, "timeZone") {
+		t.Fatalf("invalid: %v", bad)
 	}
 }

@@ -2,6 +2,7 @@ package jmap
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +51,7 @@ const (
 	ErrAccountNotSupportedByMethod = "accountNotSupportedByMethod"
 	ErrAccountReadOnly             = "accountReadOnly"
 	ErrServerFail                  = "serverFail"
+	ErrServerUnavailable           = "serverUnavailable"
 	ErrRequestTooLarge             = "requestTooLarge"
 	ErrStateMismatch               = "stateMismatch"
 	ErrCannotCalculateChanges      = "cannotCalculateChanges"
@@ -67,6 +69,7 @@ const (
 	SetInvalidPatch           = "invalidPatch"
 	SetAlreadyExists          = "alreadyExists"
 	SetTooLarge               = "tooLarge"
+	SetOverQuota              = "overQuota"
 	SetAddressBookHasContents = "addressBookHasContents"
 )
 
@@ -136,6 +139,11 @@ type Call struct {
 	created  map[string]string
 	id       string       // the current method call id
 	implicit []invocation // responses of implicit calls (RFC 8620 §5.4)
+	// refBudget is what result references may still copy (resolveRefs).
+	refBudget int
+	// ctx is the request's, with workTimeout: expansions stop when it is
+	// done, and calls still running then fail (run).
+	ctx context.Context
 }
 
 // Respond adds the response of an implicit method call, made on behalf
@@ -214,7 +222,9 @@ func (h *Handler) api(w http.ResponseWriter, r *http.Request, user string) {
 		return
 	}
 
-	c := &Call{h: h, User: user, created: map[string]string{}}
+	ctx, cancel := context.WithTimeout(r.Context(), workTimeout)
+	defer cancel()
+	c := &Call{h: h, User: user, created: map[string]string{}, refBudget: maxSizeRequest, ctx: ctx}
 	if req.CreatedIDs != nil {
 		for k, v := range *req.CreatedIDs {
 			c.created[k] = v
@@ -244,11 +254,18 @@ func (h *Handler) run(c *Call, using map[string]bool, iv invocation, done []invo
 	if !ok || !using[m.capability] {
 		return fail(Errorf(ErrUnknownMethod, "unknown method %s", iv.Name))
 	}
-	args, merr := resolveRefs(iv.Args, done)
+	args, merr := resolveRefs(iv.Args, done, &c.refBudget)
 	if merr != nil {
 		return fail(merr)
 	}
+	tooSlow := &MethodError{Type: ErrServerUnavailable, Description: "the request took too long"}
+	if c.ctx.Err() != nil {
+		return fail(tooSlow)
+	}
 	res, err := h.call(m.fn, c, args)
+	if c.ctx.Err() != nil {
+		return fail(tooSlow) // expansions may have stopped early
+	}
 	if err != nil {
 		var me *MethodError
 		if errors.As(err, &me) {
@@ -277,8 +294,10 @@ func (h *Handler) call(fn MethodFunc, c *Call, args json.RawMessage) (res any, e
 }
 
 // resolveRefs replaces "#name" arguments, which are result references
-// (RFC 8620 §3.7), with the values they point at.
-func resolveRefs(raw json.RawMessage, done []invocation) (json.RawMessage, *MethodError) {
+// (RFC 8620 §3.7), with the values they point at. Each reference can copy
+// a whole earlier response, so chained calls could grow exponentially: the
+// copied values of one request together may not exceed *budget bytes.
+func resolveRefs(raw json.RawMessage, done []invocation, budget *int) (json.RawMessage, *MethodError) {
 	var args map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return nil, Errorf(ErrInvalidArguments, "arguments must be an object")
@@ -323,6 +342,9 @@ func resolveRefs(raw json.RawMessage, done []invocation) (json.RawMessage, *Meth
 		b, err := json.Marshal(val)
 		if err != nil {
 			return nil, Errorf(ErrInvalidResultReference, "%s: %v", k, err)
+		}
+		if *budget -= len(b); *budget < 0 {
+			return nil, Errorf(ErrRequestTooLarge, "result references copy more than %d bytes", maxSizeRequest)
 		}
 		delete(args, k)
 		args[name] = b

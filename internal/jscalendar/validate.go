@@ -26,7 +26,7 @@ func Validate(e map[string]any) []string {
 		if v, ok := e[k]; ok && v != nil {
 			if !isStr(k) {
 				fail(k)
-			} else if _, err := time.LoadLocation(str(v)); err != nil {
+			} else if _, err := rrule.LoadZone(str(v)); err != nil {
 				fail(k)
 			}
 		}

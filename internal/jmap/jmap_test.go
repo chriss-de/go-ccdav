@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -315,6 +317,27 @@ func TestResultReferences(t *testing.T) {
 	}
 }
 
+// Chained references, each copying an earlier response many times, would
+// grow exponentially; together they may copy at most maxSizeRequest.
+func TestResultReferenceBudget(t *testing.T) {
+	e := newEnv(t)
+	calls := []any{call("Core/echo", map[string]any{"seed": strings.Repeat("x", 1000)}, "0")}
+	for i := 1; i <= 4; i++ { // 20 KB, 400 KB, 8 MB, then 160 MB
+		args := map[string]any{}
+		for j := range 20 {
+			args[fmt.Sprintf("#r%d", j)] = map[string]any{"resultOf": strconv.Itoa(i - 1), "name": "Core/echo", "path": ""}
+		}
+		calls = append(calls, call("Core/echo", args, strconv.Itoa(i)))
+	}
+	r := e.api("alice", calls...)
+	if errType(r[1]) != "" {
+		t.Fatalf("a small copy failed: %+v", r[1])
+	}
+	if errType(r[4]) != ErrRequestTooLarge {
+		t.Fatalf("160 MB copy: %.200v", r[4])
+	}
+}
+
 func TestCreatedIDs(t *testing.T) {
 	e := newEnv(t)
 	body := `{"using":["` + CapCore + `","` + capTest + `"],"createdIds":{"old":"o1"},"methodCalls":[["Test/create",{"cid":"k1"},"0"]]}`
@@ -451,12 +474,12 @@ func TestChangesSharedAccount(t *testing.T) {
 		t.Fatal("owner and sharee share a state string")
 	}
 
-	// A move out of the shared collection needs a resync.
+	// A move out of the shared collection is a destruction for alice.
 	s1 := e.state("alice", e.bob)["objects"].(string)
 	if _, err := shared.Move("s", private, "s", store.Cond{}); err != nil {
 		t.Fatal(err)
 	}
-	if r := e.changes("alice", "Test/changes", e.bob, s1, 0); errType(r) != ErrCannotCalculateChanges {
+	if r := e.changes("alice", "Test/changes", e.bob, s1, 0); errType(r) != "" || !slices.Equal(ids(r.Args["destroyed"]), []string{is}) {
 		t.Fatalf("move: %+v", r)
 	}
 	// So does a change of what is shared.

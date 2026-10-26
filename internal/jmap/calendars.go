@@ -1,6 +1,7 @@
 package jmap
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -308,7 +309,7 @@ func (c *Call) event(v *View, id string) (map[string]any, bool) {
 		return nil, false
 	}
 	// Only real occurrences: an override, or one the rule generates.
-	if _, isOverride := overrides(e.obj)[local.Format(localFmt)]; !isOverride && !c.h.occurs(v, ref, e.obj, local.Format(localFmt)) {
+	if _, isOverride := overrides(e.obj)[local.Format(localFmt)]; !isOverride && !c.h.occurs(c.ctx, v, ref, e.obj, local.Format(localFmt)) {
 		return nil, false
 	}
 	inst["id"] = id
@@ -353,7 +354,7 @@ func instance(e map[string]any, rid string) (map[string]any, bool) {
 
 // occurs reports whether the stored event's rules generate an instance
 // at the local recurrence id rid.
-func (h *Handler) occurs(v *View, ref store.ObjectRef, e map[string]any, rid string) bool {
+func (h *Handler) occurs(ctx context.Context, v *View, ref store.ObjectRef, e map[string]any, rid string) bool {
 	at, ok := toUTC(rid, e, time.UTC)
 	if !ok {
 		return false
@@ -362,7 +363,7 @@ func (h *Handler) occurs(v *View, ref store.ObjectRef, e map[string]any, rid str
 	if cal == nil {
 		return false
 	}
-	for o := range rrule.Expand(cal, "VEVENT", str(e["uid"]), at.Add(-time.Second), at.Add(time.Second), time.UTC) {
+	for o := range rrule.ExpandContext(ctx, cal, "VEVENT", str(e["uid"]), at.Add(-time.Second), at.Add(time.Second), time.UTC) {
 		if o.RecurrenceID.Equal(at) {
 			return true
 		}
@@ -391,7 +392,7 @@ func (h *Handler) rawCalendar(v *View, ref store.ObjectRef) *ical.Component {
 func toUTC(local string, e map[string]any, floating *time.Location) (time.Time, bool) {
 	loc := floating
 	if tz, ok := e["timeZone"].(string); ok {
-		l, err := time.LoadLocation(tz)
+		l, err := rrule.LoadZone(tz)
 		if err != nil {
 			return time.Time{}, false
 		}
@@ -436,7 +437,7 @@ func (c *Call) eventMeta(e map[string]any, floating *time.Location) {
 		dur, _ := e["duration"].(string)
 		loc := floating
 		if tz, ok := e["timeZone"].(string); ok {
-			loc, _ = time.LoadLocation(tz)
+			loc, _ = rrule.LoadZone(tz)
 		}
 		e["utcStart"] = t.Format(time.RFC3339)
 		e["utcEnd"] = addDuration(t, loc, dur).UTC().Format(time.RFC3339)
@@ -466,29 +467,41 @@ func defaultAlerts(v *View, e map[string]any) {
 	}
 }
 
-// limitOverrides drops recurrenceOverrides outside [after, before).
+// limitOverrides drops recurrenceOverrides outside [after, before). The
+// nested maps may belong to a cached conversion: replace, don't change.
 func limitOverrides(e map[string]any, before, after time.Time, floating *time.Location) {
 	ro := overrides(e)
-	for rid := range ro {
+	if ro == nil {
+		return
+	}
+	kept := make(map[string]any, len(ro))
+	for rid, o := range ro {
 		t, ok := toUTC(rid, e, floating)
-		if !ok || !before.IsZero() && !t.Before(before) || !after.IsZero() && t.Before(after) {
-			delete(ro, rid)
+		if ok && (before.IsZero() || t.Before(before)) && (after.IsZero() || !t.Before(after)) {
+			kept[rid] = o
 		}
 	}
+	e["recurrenceOverrides"] = kept
 }
 
-// reduceParticipants keeps the owner and the caller.
+// reduceParticipants keeps the owner and the caller. Like limitOverrides,
+// it replaces the participants map instead of changing it.
 func (c *Call) reduceParticipants(e map[string]any) {
 	ps, _ := e["participants"].(map[string]any)
+	if ps == nil {
+		return
+	}
 	email := strings.ToLower(c.h.cfg.Get().Users[c.User].Email)
+	kept := make(map[string]any, len(ps))
 	for id, p := range ps {
 		pm, _ := p.(map[string]any)
 		roles, _ := pm["roles"].(map[string]any)
 		mine := email != "" && strings.EqualFold(strings.TrimPrefix(strings.ToLower(str(pm["calendarAddress"])), "mailto:"), email)
-		if roles["owner"] != true && !mine {
-			delete(ps, id)
+		if roles["owner"] == true || mine {
+			kept[id] = p
 		}
 	}
+	e["participants"] = kept
 }
 
 func str(v any) string {
@@ -501,7 +514,7 @@ func zoneArg(tz string) (*time.Location, error) {
 	if tz == "" {
 		return time.UTC, nil
 	}
-	loc, err := time.LoadLocation(tz)
+	loc, err := rrule.LoadZone(tz)
 	if err != nil {
 		return nil, Errorf(ErrInvalidArguments, "unknown time zone %q", tz)
 	}
@@ -638,8 +651,15 @@ func (c *Call) availability(raw json.RawMessage) (any, error) {
 			}
 		}
 	}
+	ps, err := caldav.FreeBusy(c.ctx, cals, from.UTC(), to.UTC(), time.UTC)
+	if c.ctx.Err() != nil {
+		return nil, c.ctx.Err() // run answers serverUnavailable
+	}
+	if err != nil {
+		return nil, Errorf(ErrRequestTooLarge, "more than %d busy periods; ask for a shorter time", caldav.MaxFreeBusyPeriods)
+	}
 	list := []any{}
-	for _, p := range caldav.FreeBusy(cals, from.UTC(), to.UTC(), time.UTC) {
+	for _, p := range ps {
 		status := "confirmed"
 		if p.Type == caldav.FBBusyTentative {
 			status = "tentative"

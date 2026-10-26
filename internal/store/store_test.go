@@ -91,3 +91,43 @@ func TestValidName(t *testing.T) {
 		t.Error("rejected normal name")
 	}
 }
+
+// Nothing bounded what a user could store: every user could fill the disk
+// for everyone.
+func TestQuota(t *testing.T) {
+	root := t.TempDir()
+	s := New(root, uidOf)
+	s.SetQuota(func() int64 { return 1000 })
+	a, _ := s.CreateCollection("alice", Calendars, "a", Meta{})
+	b, _ := s.CreateCollection("alice", Calendars, "b", Meta{})
+	other, _ := s.CreateCollection("bob", Calendars, "c", Meta{})
+	data := func(n int) []byte { return []byte(strings.Repeat("x", n)) }
+	if _, _, err := a.Put("1", data(600), Cond{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := b.Put("2", data(600), Cond{}); !errors.Is(err, ErrQuota) {
+		t.Fatalf("1200 bytes in two collections: %v", err)
+	}
+	if _, _, err := other.Put("3", data(600), Cond{}); err != nil {
+		t.Fatalf("another user's quota: %v", err)
+	}
+	if _, _, err := a.Put("1", data(900), Cond{}); err != nil {
+		t.Fatalf("growing within the quota: %v", err)
+	}
+	if err := a.Delete("1", Cond{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := b.Put("2", data(900), Cond{}); err != nil {
+		t.Fatalf("after freeing space: %v", err)
+	}
+	// Usage survives a restart.
+	s2 := New(root, uidOf)
+	s2.SetQuota(func() int64 { return 1000 })
+	if err := s2.LoadAll(); err != nil {
+		t.Fatal(err)
+	}
+	b2, _ := s2.Collection("alice", Calendars, "b")
+	if _, _, err := b2.Put("4", data(200), Cond{}); !errors.Is(err, ErrQuota) {
+		t.Fatalf("after reload: %v", err)
+	}
+}

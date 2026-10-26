@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/chriss-de/go-ccdav/internal/auth"
 	"github.com/chriss-de/go-ccdav/internal/config"
@@ -59,6 +60,7 @@ func newServer(t *testing.T, mut func(*config.Config)) (*httptest.Server, *store
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	st := store.New(dir, UIDOf)
+	st.SetQuota(func() int64 { return cs.Get().QuotaBytes })
 	if cfg.CalDAVPerUser {
 		st.TrackAccounts()
 	}
@@ -302,6 +304,24 @@ func TestMultigetAndExpand(t *testing.T) {
 	notContains(t, out, "RRULE", "VTIMEZONE", "20260119T080000Z", "20260202T080000Z", "TZID")
 }
 
+// Expanding a tiny every-second event over a year would be a gigabyte;
+// the request's budget turns that into 507 for the property.
+func TestExpandBudget(t *testing.T) {
+	alice, _ := newTestServer(t)
+	secondly := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VEVENT\r\nUID:s1\r\nDTSTAMP:20260101T000000Z\r\n" +
+		"DTSTART:20260101T000000Z\r\nRRULE:FREQ=SECONDLY\r\nSUMMARY:" + strings.Repeat("x", 500) + "\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	alice.expect("PUT", "/dav/calendars/alice/personal/s1.ics", secondly, http.StatusCreated)
+	alice.expect("PUT", "/dav/calendars/alice/personal/weekly.ics", weekly, http.StatusCreated)
+	_, out := alice.expect("REPORT", "/dav/calendars/alice/personal/", `<c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+<d:prop><c:calendar-data><c:expand start="20260101T000000Z" end="20270101T000000Z"/></c:calendar-data></d:prop>
+<d:href>/dav/calendars/alice/personal/weekly.ics</d:href><d:href>/dav/calendars/alice/personal/s1.ics</d:href>
+</c:calendar-multiget>`, http.StatusMultiStatus)
+	contains(t, out, "RECURRENCE-ID:20260112T080000Z", "HTTP/1.1 507 Insufficient Storage")
+	if len(out) > 1<<20 {
+		t.Fatalf("response is %d bytes", len(out))
+	}
+}
+
 func TestQueryTextMatchAndTodo(t *testing.T) {
 	alice, _ := newTestServer(t)
 	todo := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VTODO\r\nUID:t1\r\nDTSTAMP:20260101T000000Z\r\nDUE:20260210T120000Z\r\nSUMMARY:Buy Milk\r\nSTATUS:NEEDS-ACTION\r\nEND:VTODO\r\nEND:VCALENDAR\r\n"
@@ -397,7 +417,7 @@ func TestSyncCollection(t *testing.T) {
 	notContains(t, out, "g.ics")
 	_, out = alice.expect("REPORT", cal, syncReport(tokenOf(t, out), 2), http.StatusMultiStatus)
 	contains(t, out, "g.ics")
-	notContains(t, out, "e.ics", "507")
+	notContains(t, out, "e.ics", "HTTP/1.1 507") // not "507": random sync ids may contain it
 
 	// Tokens from before the rename still sync incrementally.
 	_, out = alice.expect("REPORT", cal, syncReport(strings.Replace(tok3, "http://ccdav/", "http://davd/", 1), 0), http.StatusMultiStatus)
@@ -559,4 +579,52 @@ func TestAddressbookQuery(t *testing.T) {
 	_, out = alice.expect("REPORT", book, q(`<card:filter><card:prop-filter name="FN"><card:text-match match-type="regex">x</card:text-match></card:prop-filter></card:filter>`, ""), http.StatusForbidden, "Depth", "1")
 	contains(t, out, "valid-filter")
 	alice.expect("REPORT", book, query("20260101T000000Z", "20270101T000000Z"), http.StatusForbidden, "Depth", "1")
+}
+
+// Expanding series far from their start costs up to maxScan instances
+// each; a request that runs past its deadline stops and says so instead
+// of answering late (or never) with partial results.
+func TestExpansionDeadline(t *testing.T) {
+	defer func(d time.Duration) { workTimeout = d }(workTimeout)
+	workTimeout = 100 * time.Millisecond
+	alice, _ := newTestServer(t)
+	for i := range 5 {
+		alice.expect("PUT", fmt.Sprintf("/dav/calendars/alice/personal/s%d.ics", i), "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\n"+
+			fmt.Sprintf("BEGIN:VEVENT\r\nUID:s%d\r\nDTSTAMP:20000101T000000Z\r\nDTSTART:20000101T000000Z\r\n", i)+
+			"RRULE:FREQ=SECONDLY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n", http.StatusCreated)
+	}
+	const rng = `start="20260101T000000Z" end="20260102T000000Z"`
+	for name, body := range map[string]string{
+		"calendar-query": `<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/></d:prop>
+<c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"><c:time-range ` + rng + `/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>`,
+		"free-busy": `<c:free-busy-query xmlns:c="urn:ietf:params:xml:ns:caldav"><c:time-range ` + rng + `/></c:free-busy-query>`,
+		"expand": `<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-data><c:expand ` + rng + `/></c:calendar-data></d:prop>
+<c:filter><c:comp-filter name="VCALENDAR"/></c:filter></c:calendar-query>`,
+	} {
+		start := time.Now()
+		resp, _ := alice.do("REPORT", "/dav/calendars/alice/personal/", body, "Depth", "1")
+		if resp.StatusCode != http.StatusServiceUnavailable {
+			t.Errorf("%s: %d, want 503", name, resp.StatusCode)
+		}
+		if d := time.Since(start); d > time.Second {
+			t.Errorf("%s: took %v", name, d)
+		}
+	}
+}
+
+// With a quota, writes past it fail with 507 and DAV:quota-not-exceeded,
+// also when a sharee writes into the owner's collection.
+func TestQuotaDAV(t *testing.T) {
+	srv, st := newServer(t, func(c *config.Config) { c.Quota = "2KB" })
+	alice, bob := &client{t, srv, "alice"}, &client{t, srv, "bob"}
+	pad := "DESCRIPTION:" + strings.Repeat("x", 1500) + "\r\n"
+	big := event("big", "20260105T090000Z", pad)
+	alice.expect("PUT", "/dav/calendars/alice/personal/1.ics", big, http.StatusCreated)
+	_, out := alice.expect("PUT", "/dav/calendars/alice/personal/2.ics", event("b2", "20260105T090000Z", pad), http.StatusInsufficientStorage)
+	contains(t, out, "quota-not-exceeded")
+	col, _ := st.Collection("alice", store.Calendars, "personal")
+	col.SetShares([]store.Share{{User: "bob", Access: store.AccessWrite}})
+	bob.expect("PUT", "/dav/calendars/bob/alice~personal/3.ics", event("b3", "20260105T090000Z", pad), http.StatusInsufficientStorage)
+	alice.expect("DELETE", "/dav/calendars/alice/personal/1.ics", "", http.StatusNoContent)
+	bob.expect("PUT", "/dav/calendars/bob/alice~personal/3.ics", event("b3", "20260105T090000Z", pad), http.StatusCreated)
 }

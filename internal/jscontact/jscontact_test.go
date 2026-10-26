@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/chriss-de/go-ccdav/internal/ical"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden .json files")
@@ -98,5 +100,26 @@ func TestSplitStructured(t *testing.T) {
 func TestNotAVCard(t *testing.T) {
 	if _, err := (Codec{}).ToJMAP([]byte("BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n")); err == nil {
 		t.Fatal("converted a VCALENDAR")
+	}
+}
+
+// See the jscalendar test of the same name.
+func TestDeepJSPropDropped(t *testing.T) {
+	for _, prop := range []string{
+		"JSPROP;JSPTR=" + strings.Repeat("a/", 20000) + "b:1",
+		"JSPROP;JSPTR=x:" + strings.Repeat("[", 9990) + strings.Repeat("]", 9990),
+		"JSPROP;JSPTR=" + strings.Repeat("a/", 15) + "b:" + strings.Repeat("[", 9990) + strings.Repeat("]", 9990),
+	} {
+		vc, err := ical.ParseBytes([]byte("BEGIN:VCARD\r\nVERSION:4.0\r\nUID:u\r\nFN:f\r\n" + prop + "\r\nEND:VCARD\r\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		card, err := FromVCard(vc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := json.Marshal(card); err != nil {
+			t.Errorf("%.40s...: %v", prop, err)
+		}
 	}
 }

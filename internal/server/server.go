@@ -17,6 +17,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -29,10 +30,15 @@ import (
 	"github.com/chriss-de/go-ccdav/internal/carddav"
 	"github.com/chriss-de/go-ccdav/internal/clientip"
 	"github.com/chriss-de/go-ccdav/internal/config"
+	"github.com/chriss-de/go-ccdav/internal/dav"
 	"github.com/chriss-de/go-ccdav/internal/store"
 )
 
 const maxResourceSize = 10 << 20
+
+// workTimeout bounds how long one request may spend expanding recurrences
+// (queries, free/busy, expand); after it, the request fails with 503.
+var workTimeout = 20 * time.Second
 
 type Server struct {
 	prefix string // DAV prefix, fixed for the server's lifetime
@@ -121,6 +127,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, ip string) (user 
 		return ""
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxResourceSize)
+	ctx, cancel := context.WithTimeout(r.Context(), workTimeout)
+	defer cancel()
+	r = r.WithContext(ctx)
 	res, err := s.resolve(p, user)
 	if err != nil {
 		s.httpError(w, err)
@@ -180,6 +189,10 @@ func (s *Server) httpError(w http.ResponseWriter, err error) {
 		needPrivileges(w)
 	case errors.Is(err, store.ErrBadName):
 		http.Error(w, "invalid name", http.StatusBadRequest)
+	case errors.Is(err, store.ErrQuota):
+		dav.WriteError(w, http.StatusInsufficientStorage, dav.N(dav.NSDAV, "quota-not-exceeded"), "storage quota exceeded")
+	case errors.Is(err, store.ErrTooLarge):
+		http.Error(w, "too large", http.StatusInsufficientStorage)
 	default:
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {

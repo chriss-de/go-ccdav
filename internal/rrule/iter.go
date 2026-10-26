@@ -2,6 +2,7 @@ package rrule
 
 import (
 	"cmp"
+	"context"
 	"iter"
 	"slices"
 	"time"
@@ -17,7 +18,38 @@ const (
 	// maxEmptySteps bounds the number of consecutive periods that produce
 	// nothing (protects sub-daily rules that can never match).
 	maxEmptySteps = 1 << 20
+	// maxWork bounds the fruitless steps of one expansion: periods that
+	// produce nothing (weighted by their days) and the inner searches of
+	// sub-daily rules. A budget is shared by all rules of an Expand call or
+	// a VTIMEZONE, so rules that rarely or never match can't search for
+	// centuries each. Productive periods are bounded by the consumer.
+	maxWork = 1 << 21
 )
+
+// budget is the work an expansion may still do, and the context it does
+// it for (nil: none).
+type budget struct {
+	left  int
+	ctx   context.Context
+	ticks int
+}
+
+func newBudget() *budget { return &budget{left: maxWork} }
+
+// alive reports whether the expansion may go on: it checks the context
+// every 1024 calls.
+func (b *budget) alive() bool {
+	if b.ticks++; b.ctx == nil || b.ticks%1024 != 0 {
+		return true
+	}
+	return b.ctx.Err() == nil
+}
+
+// spend uses n steps and reports whether the budget still holds.
+func (b *budget) spend(n int) bool {
+	b.left -= n
+	return b.left >= 0
+}
 
 // Iter yields the occurrences of the rule for the given DTSTART in ascending
 // order, in dtstart.Location(). Per RFC 5545, DTSTART is always the first
@@ -34,6 +66,11 @@ const (
 // BYMONTH=2;BYMONTHDAY=30). Unbounded rules are otherwise infinite; the
 // consumer must stop pulling.
 func (r *Rule) Iter(dtstart time.Time) iter.Seq[time.Time] {
+	return r.iter(dtstart, newBudget())
+}
+
+// iter is Iter drawing on work, which the caller may share between rules.
+func (r *Rule) iter(dtstart time.Time, work *budget) iter.Seq[time.Time] {
 	return func(yield func(time.Time) bool) {
 		dtstart = dtstart.Truncate(time.Second)
 		if !yield(dtstart) {
@@ -43,7 +80,7 @@ func (r *Rule) Iter(dtstart time.Time) iter.Seq[time.Time] {
 		if r.Count > 0 && n >= r.Count {
 			return
 		}
-		for t := range r.expand(dtstart, 0) {
+		for t := range r.expandWithin(dtstart, 0, work) {
 			if !t.After(dtstart) {
 				continue
 			}
@@ -78,8 +115,13 @@ func (r *Rule) untilBefore(t time.Time) bool {
 // that match the rule, limited by count (0 = no limit) and UNTIL. DTSTART is
 // only included if it matches. Used directly by the dateutil test vectors.
 func (r *Rule) expand(dtstart time.Time, count int) iter.Seq[time.Time] {
+	return r.expandWithin(dtstart, count, newBudget())
+}
+
+func (r *Rule) expandWithin(dtstart time.Time, count int, work *budget) iter.Seq[time.Time] {
 	return func(yield func(time.Time) bool) {
 		e := newExpander(r, dtstart)
+		e.work = work
 		e.run(count, yield)
 	}
 }
@@ -106,6 +148,7 @@ type expander struct {
 	bysetpos    []int
 	timeset     []hms
 	impossible  bool
+	work        *budget
 
 	// year info
 	year, yearLen, nextYearLen int
@@ -428,6 +471,9 @@ func (e *expander) run(count int, yield func(time.Time) bool) {
 		inst       []time.Time
 	)
 	for {
+		if !e.work.alive() {
+			return
+		}
 		// Collect the matching days of this period.
 		start, end := e.dayset(year, month, day)
 		days = days[:0]
@@ -507,7 +553,7 @@ func (e *expander) run(count int, yield func(time.Time) bool) {
 			emptySteps = 0
 		} else {
 			emptySteps++
-			if emptySteps > maxEmptySteps || year > lastYield+horizonYears+e.interval {
+			if emptySteps > maxEmptySteps || year > lastYield+horizonYears+e.interval || !e.work.spend(1+end-start) {
 				return
 			}
 		}
@@ -570,6 +616,9 @@ func (e *expander) run(count int, yield func(time.Time) bool) {
 			valid := false
 			rep := 24 * 60
 			for range rep / gcd(e.interval, rep) {
+				if !e.work.spend(1) {
+					return
+				}
 				var nhours int
 				if len(e.byminute) > 0 {
 					var ok bool
@@ -602,6 +651,9 @@ func (e *expander) run(count int, yield func(time.Time) bool) {
 			valid := false
 			rep := 24 * 3600
 			for range rep / gcd(e.interval, rep) {
+				if !e.work.spend(1) {
+					return
+				}
 				var nminutes int
 				if len(e.bysecond) > 0 {
 					var ok bool

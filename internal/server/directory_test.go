@@ -41,7 +41,7 @@ func TestDirectoryReadOnly(t *testing.T) {
 	alice.expect("DELETE", card, "", http.StatusForbidden)
 	alice.expect("DELETE", book, "", http.StatusForbidden)
 	_, out = alice.expect("PROPPATCH", book, `<d:propertyupdate xmlns:d="DAV:"><d:set><d:prop><d:displayname>Mine</d:displayname></d:prop></d:set></d:propertyupdate>`, http.StatusMultiStatus)
-	contains(t, out, "403")
+	contains(t, out, "HTTP/1.1 403")
 	if c, _ := st.Collection("alice", "addressbooks", directory.Name); c.Meta().DisplayName != "Directory" || len(c.List()) != 4 {
 		t.Fatalf("directory changed: %+v, %d cards", c.Meta(), len(c.List()))
 	}

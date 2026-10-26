@@ -1,6 +1,8 @@
 package caldav
 
 import (
+	"context"
+	"errors"
 	"slices"
 	"strings"
 	"time"
@@ -21,14 +23,23 @@ type Period struct {
 	Type       string
 }
 
+// MaxFreeBusyPeriods bounds the busy periods of one free/busy answer
+// after merging.
+const MaxFreeBusyPeriods = 50_000
+
+// ErrFreeBusyTooLarge is returned when there are more busy periods than
+// MaxFreeBusyPeriods.
+var ErrFreeBusyTooLarge = errors.New("caldav: too many busy periods")
+
 // FreeBusy computes the busy periods of the given calendars within
 // [from, to) from their VEVENTs, recurrences expanded (RFC 4791 §7.10).
 // Transparent, cancelled and zero-length instances don't block time;
 // tentative ones are BUSY-TENTATIVE. Periods of the same type are merged.
-func FreeBusy(cals []*ical.Component, from, to time.Time, floating *time.Location) []Period {
+// When ctx is done, FreeBusy stops and fails with its error.
+func FreeBusy(ctx context.Context, cals []*ical.Component, from, to time.Time, floating *time.Location) ([]Period, error) {
 	var ps []Period
 	for _, cal := range cals {
-		for o := range rrule.Expand(cal, "VEVENT", "", from, to, floating) {
+		for o := range rrule.ExpandContext(ctx, cal, "VEVENT", "", from, to, floating) {
 			c := o.Comp
 			if strings.EqualFold(c.Value("TRANSP"), "TRANSPARENT") || strings.EqualFold(c.Value("STATUS"), "CANCELLED") {
 				continue
@@ -48,9 +59,20 @@ func FreeBusy(cals []*ical.Component, from, to time.Time, floating *time.Locatio
 				typ = FBBusyTentative
 			}
 			ps = append(ps, Period{start.UTC(), end.UTC(), typ})
+			if len(ps) >= 2*MaxFreeBusyPeriods {
+				if ps = mergePeriods(ps); len(ps) > MaxFreeBusyPeriods {
+					return nil, ErrFreeBusyTooLarge
+				}
+			}
 		}
 	}
-	return mergePeriods(ps)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if ps = mergePeriods(ps); len(ps) > MaxFreeBusyPeriods {
+		return nil, ErrFreeBusyTooLarge
+	}
+	return ps, nil
 }
 
 func mergePeriods(ps []Period) []Period {

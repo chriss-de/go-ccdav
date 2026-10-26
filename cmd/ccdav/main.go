@@ -112,6 +112,7 @@ func run() error {
 	}
 	dataDir := dataDirOf(*dataFlag, cfg.Get())
 	st := store.New(dataDir, server.UIDOf)
+	st.SetQuota(func() int64 { return cfg.Get().QuotaBytes })
 	if cfg.Get().JMAP || cfg.Get().CalDAVPerUser {
 		st.TrackAccounts() // per-user data hangs off the account logs' ids
 	}
@@ -140,7 +141,7 @@ func run() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	limiter := auth.NewLimiter() // shared: failed DAV and UI logins count together
-	ui := web.New(cfg, st, appPass, limiter, key, defaults, log)
+	ui := web.New(cfg, st, appPass, auth.NewSessions(dataDir), limiter, key, defaults, log)
 	mux.Handle(cfg.Get().UIPrefix, ui)
 	mux.HandleFunc("GET /{$}", ui.Landing) // exactly "/"; other methods (PROPFIND) fall through to DAV
 	var jh *jmap.Handler

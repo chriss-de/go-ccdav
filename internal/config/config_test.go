@@ -147,10 +147,10 @@ func TestOIDCConfig(t *testing.T) {
 	if c.OIDC.UsernameClaim != "preferred_username" || len(c.OIDC.Scopes) != 3 || c.BaseURL != "https://x.example" {
 		t.Fatalf("%+v %q", c.OIDC, c.BaseURL)
 	}
-	if u, ok := c.UserByLogin("alice@example.com"); !ok || u != "alice" {
+	if u, ok := c.UserByEmail("alice@example.com"); !ok || u != "alice" {
 		t.Fatal(u, ok)
 	}
-	if _, ok := c.UserByLogin("mallory"); ok {
+	if _, ok := c.UserByEmail("mallory"); ok {
 		t.Fatal("unknown login accepted")
 	}
 	for _, bad := range []string{
@@ -158,6 +158,21 @@ func TestOIDCConfig(t *testing.T) {
 		"base_url: https://x\noidc:\n  client_id: x\n",   // no issuer
 	} {
 		if _, err := Load(write(t, dir, "config.yaml", bad)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestQuotaParsing(t *testing.T) {
+	dir := t.TempDir()
+	for in, want := range map[string]int64{"": 0, "1048576": 1 << 20, "500MB": 500 << 20, "2GB": 2 << 30, "1.5GB": 3 << 29, "64 kb": 64 << 10} {
+		c, err := Load(write(t, dir, "config.yaml", "quota: \""+in+"\"\nusers: {}\n"))
+		if err != nil || c.QuotaBytes != want {
+			t.Errorf("%q: %d, %v; want %d", in, c.QuotaBytes, err, want)
+		}
+	}
+	for _, bad := range []string{"lots", "-1GB", "5XB", "GB", "NaN", "inf"} {
+		if _, err := Load(write(t, dir, "config.yaml", "quota: \""+bad+"\"\nusers: {}\n")); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
 	}

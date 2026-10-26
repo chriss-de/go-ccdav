@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,6 +40,8 @@ var (
 	ErrPrecondition = errors.New("store: precondition failed")
 	ErrBadName      = errors.New("store: invalid name")
 	ErrReadOnly     = errors.New("store: read-only collection")
+	ErrTooLarge     = errors.New("store: too large")
+	ErrQuota        = errors.New("store: storage quota exceeded")
 )
 
 // UIDConflictError is returned by Put when another object in the collection
@@ -98,6 +101,36 @@ type Store struct {
 
 	prefs prefsStore
 	over  overlays
+
+	quota atomic.Pointer[func() int64] // per-user bytes, 0 = none (SetQuota)
+	used  map[string]*atomic.Int64     // owner -> bytes of their loaded collections
+}
+
+// SetQuota sets how many bytes of objects each user may own; q is asked
+// on every write (0 = no limit). Writes to a shared collection count for
+// its owner; generated (read-only) collections don't count.
+func (s *Store) SetQuota(q func() int64) { s.quota.Store(&q) }
+
+// quotaNow is the current quota; collections call it under their lock,
+// so it takes none.
+func (s *Store) quotaNow() int64 {
+	if q := s.quota.Load(); q != nil {
+		return (*q)()
+	}
+	return 0
+}
+
+// usedBy returns owner's usage counter; the caller holds s.mu.
+func (s *Store) usedBy(owner string) *atomic.Int64 {
+	if s.used == nil {
+		s.used = map[string]*atomic.Int64{}
+	}
+	u := s.used[owner]
+	if u == nil {
+		u = new(atomic.Int64)
+		s.used[owner] = u
+	}
+	return u
 }
 
 func New(root string, uidOf UIDFunc) *Store {
@@ -117,6 +150,12 @@ func ValidName(name string) bool {
 	return true
 }
 
+// validHome reports whether owner and kind can be used as path segments:
+// a plain name and one of the two kinds, so nothing escapes users/.
+func validHome(owner string, kind Kind) bool {
+	return ValidName(owner) && (kind == Calendars || kind == AddressBooks)
+}
+
 func (s *Store) homeDir(owner string, kind Kind) string {
 	return filepath.Join(s.root, "users", owner, string(kind))
 }
@@ -130,6 +169,9 @@ func ValidCollectionName(name string) bool {
 // EnsureHome creates the home directory if needed. When it did not exist
 // yet, the given default collections are created in it.
 func (s *Store) EnsureHome(owner string, kind Kind, defaults map[string]Meta) error {
+	if !validHome(owner, kind) {
+		return ErrBadName
+	}
 	dir := s.homeDir(owner, kind)
 	if _, err := os.Stat(dir); err == nil {
 		return nil
@@ -147,6 +189,9 @@ func (s *Store) EnsureHome(owner string, kind Kind, defaults map[string]Meta) er
 
 // Collections lists the owner's collections of a kind, sorted by name.
 func (s *Store) Collections(owner string, kind Kind) ([]*Collection, error) {
+	if !validHome(owner, kind) {
+		return nil, ErrNotFound
+	}
 	ents, err := os.ReadDir(s.homeDir(owner, kind))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -170,7 +215,7 @@ func (s *Store) Collections(owner string, kind Kind) ([]*Collection, error) {
 
 // Collection returns a loaded collection or ErrNotFound.
 func (s *Store) Collection(owner string, kind Kind, name string) (*Collection, error) {
-	if !ValidName(name) {
+	if !ValidName(name) || !validHome(owner, kind) {
 		return nil, ErrNotFound
 	}
 	key := owner + "/" + string(kind) + "/" + name
@@ -183,10 +228,13 @@ func (s *Store) Collection(owner string, kind Kind, name string) (*Collection, e
 		Owner: owner, Kind: kind, Name: name,
 		dir:   filepath.Join(s.homeDir(owner, kind), name),
 		uidOf: s.uidOf,
+		used:  s.usedBy(owner),
+		quota: s.quotaNow,
 	}
 	if err := c.load(); err != nil {
 		return nil, err
 	}
+	c.used.Add(c.bytes)
 	if s.track {
 		a, err := s.account(owner, kind)
 		if err != nil {
@@ -200,7 +248,7 @@ func (s *Store) Collection(owner string, kind Kind, name string) (*Collection, e
 
 // CreateCollection makes a new collection.
 func (s *Store) CreateCollection(owner string, kind Kind, name string, m Meta) (*Collection, error) {
-	if !ValidCollectionName(name) {
+	if !ValidCollectionName(name) || !validHome(owner, kind) {
 		return nil, ErrBadName
 	}
 	dir := filepath.Join(s.homeDir(owner, kind), name)
@@ -240,6 +288,8 @@ func (s *Store) DeleteCollection(c *Collection) error {
 	if err := os.RemoveAll(c.dir); err != nil {
 		return err
 	}
+	c.used.Add(-c.bytes)
+	c.bytes = 0
 	return c.acct.noteCollectionDeleted(c)
 }
 
@@ -261,6 +311,10 @@ type Collection struct {
 	logLines int
 	deleted  bool
 	acct     *Account // nil unless the store tracks accounts
+
+	bytes int64         // size of the objects
+	used  *atomic.Int64 // the owner's bytes, shared by their collections
+	quota func() int64  // the store's quotaNow
 }
 
 func (c *Collection) load() error {
@@ -294,6 +348,7 @@ func (c *Collection) load() error {
 		}
 		info := c.info(e.Name(), data, fi.ModTime())
 		c.objs[info.Name] = info
+		c.bytes += info.Size
 		if info.UID != "" {
 			c.uids[info.UID] = info.Name
 		}
@@ -475,10 +530,18 @@ func (c *Collection) Put(name string, data []byte, cond Cond) (info ObjectInfo, 
 			return ObjectInfo{}, false, &UIDConflictError{Existing: other}
 		}
 	}
+	old, existed := c.objs[name]
+	grow := info.Size - old.Size
+	if grow > 0 && !c.meta.ReadOnly && c.quota != nil {
+		if q := c.quota(); q > 0 && c.used.Load()+grow > q {
+			return ObjectInfo{}, false, ErrQuota
+		}
+	}
 	if err := writeFileAtomic(filepath.Join(c.dir, name), data); err != nil {
 		return ObjectInfo{}, false, err
 	}
-	old, existed := c.objs[name]
+	c.bytes += grow
+	c.used.Add(grow)
 	if existed && old.UID != "" {
 		delete(c.uids, old.UID)
 	}
@@ -507,6 +570,8 @@ func (c *Collection) Delete(name string, cond Cond) error {
 		return err
 	}
 	delete(c.objs, name)
+	c.bytes -= o.Size
+	c.used.Add(-o.Size)
 	if o.UID != "" {
 		delete(c.uids, o.UID)
 	}
@@ -565,6 +630,8 @@ func (c *Collection) Move(name string, to *Collection, newName string, cond Cond
 		return ObjectInfo{}, err
 	}
 	delete(c.objs, name)
+	c.bytes -= o.Size // same owner: their usage stays
+	to.bytes += info.Size
 	if o.UID != "" {
 		delete(c.uids, o.UID)
 		to.uids[o.UID] = newName

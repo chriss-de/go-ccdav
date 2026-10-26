@@ -3,6 +3,7 @@ package jmap
 import (
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -199,5 +200,30 @@ func TestCalendarEventCopyAndParse(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(ids2list(r.Args["notParsable"]), ","), junk) || !strings.Contains(strings.Join(ids2list(r.Args["notFound"]), ","), "Gnope") {
 		t.Fatalf("%+v", r.Args)
+	}
+	// Any number of ids was accepted, and duplicates were parsed again.
+	many := make([]string, MaxObjectsInGet+1)
+	for i := range many {
+		many[i] = "Gx" + strconv.Itoa(i)
+	}
+	r = e.api("alice", call("CalendarEvent/parse", map[string]any{"accountId": e.alice, "blobIds": many}, "0"))[0]
+	if errType(r) != ErrRequestTooLarge {
+		t.Fatalf("%d blob ids: %.200v", len(many), r)
+	}
+	r = e.api("alice", call("CalendarEvent/parse", map[string]any{"accountId": e.alice, "blobIds": []string{junk, junk}}, "0"))[0]
+	if l := ids2list(r.Args["notParsable"]); len(l) != 1 {
+		t.Fatalf("duplicate id reported %d times", len(l))
+	}
+}
+
+// Writes past the owner's storage quota fail with overQuota.
+func TestEventSetOverQuota(t *testing.T) {
+	e, cal, _ := calendarsEnv(t)
+	e.st.SetQuota(func() int64 { return 1 }) // the fixtures already use more
+	r := e.api("alice", call("CalendarEvent/set", map[string]any{"accountId": e.alice, "create": map[string]any{
+		"n": map[string]any{"calendarIds": map[string]any{cal.ID(): true}, "title": "big", "start": "2026-01-01T10:00:00", "duration": "PT1H"}}}, "0"))[0]
+	nc, _ := r.Args["notCreated"].(map[string]any)
+	if se, _ := nc["n"].(map[string]any); se["type"] != SetOverQuota {
+		t.Fatalf("%.300v", r.Args)
 	}
 }

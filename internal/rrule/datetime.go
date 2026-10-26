@@ -3,6 +3,7 @@ package rrule
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -168,8 +169,12 @@ type Duration struct {
 }
 
 // maxDurDays bounds parsed durations (about 27000 years) so arithmetic
-// cannot overflow.
-const maxDurDays = 10_000_000
+// cannot overflow; maxDurSecs keeps the clock part within time.Duration
+// (about 292 years).
+const (
+	maxDurDays = 10_000_000
+	maxDurSecs = math.MaxInt64 / int64(time.Second)
+)
 
 // ParseDuration parses an RFC 5545 duration such as "P1W", "-PT15M" or
 // "P1DT2H". It is lenient about combining weeks with other units.
@@ -229,7 +234,7 @@ func ParseDuration(s string) (Duration, error) {
 		default:
 			return bad()
 		}
-		if d.Days > maxDurDays || secs > maxDurDays*86400 {
+		if d.Days > maxDurDays || secs > maxDurSecs {
 			return bad()
 		}
 	}

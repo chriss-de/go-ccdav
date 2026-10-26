@@ -25,8 +25,19 @@ func FuzzParseXML(f *testing.F) {
 			if depth > 66 {
 				t.Fatal("depth limit not enforced")
 			}
-			if !strings.Contains(s, e.Inner) {
-				t.Fatalf("Inner %q is not part of the input", e.Inner)
+			// Inner stands alone: it parses wrapped in a bare element, with
+			// the same children and text.
+			w, err := ParseXML(strings.NewReader("<w>" + e.Inner + "</w>"))
+			if err != nil {
+				t.Fatalf("Inner %q does not parse: %v", e.Inner, err)
+			}
+			if w.Text != e.Text || len(w.Children) != len(e.Children) {
+				t.Fatalf("Inner %q: text %q, %d children; want %q, %d", e.Inner, w.Text, len(w.Children), e.Text, len(e.Children))
+			}
+			for i, c := range w.Children {
+				if c.Name != e.Children[i].Name {
+					t.Fatalf("Inner %q: child %v, want %v", e.Inner, c.Name, e.Children[i].Name)
+				}
 			}
 			for _, c := range e.Children {
 				walk(c, depth+1)

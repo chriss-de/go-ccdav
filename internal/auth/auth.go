@@ -59,6 +59,13 @@ func Verify(hash, password string) (bool, error) {
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
+// dummyHash has the cost of a real hash; no password matches it.
+const dummyHash = "pbkdf2-sha256$600000$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+// VerifyNone spends the time of a Verify without a hash to check against,
+// so that unknown users take as long to refuse as known ones.
+func VerifyNone(password string) { Verify(dummyHash, password) }
+
 // Cache remembers successful verifications for a while: DAV clients send
 // Basic credentials on every request and PBKDF2 is deliberately slow.
 type Cache struct {

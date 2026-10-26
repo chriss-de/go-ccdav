@@ -1,6 +1,8 @@
 package caldav
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -52,5 +54,22 @@ func TestSplitMerge(t *testing.T) {
 	}
 	if _, _, err := Split([]byte("garbage")); err == nil {
 		t.Fatal("garbage accepted")
+	}
+}
+
+// A big VTIMEZONE used by many small events would be copied into each.
+func TestSplitTooLarge(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VTIMEZONE\r\nTZID:Z\r\n")
+	for range 1000 {
+		sb.WriteString("BEGIN:STANDARD\r\nDTSTART:19700101T000000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0100\r\nX-PAD:" + strings.Repeat("x", 200) + "\r\nEND:STANDARD\r\n")
+	}
+	sb.WriteString("END:VTIMEZONE\r\n")
+	for i := range 2000 {
+		fmt.Fprintf(&sb, "BEGIN:VEVENT\r\nUID:%d\r\nDTSTART;TZID=Z:20260101T000000\r\nEND:VEVENT\r\n", i)
+	}
+	sb.WriteString("END:VCALENDAR\r\n")
+	if _, _, err := Split([]byte(sb.String())); !errors.Is(err, ErrSplitTooLarge) {
+		t.Fatalf("err = %v, want ErrSplitTooLarge", err)
 	}
 }

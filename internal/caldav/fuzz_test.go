@@ -1,6 +1,7 @@
 package caldav
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func FuzzRenderData(f *testing.F) {
 		if err != nil || se == nil {
 			return
 		}
-		RenderData([]byte(ics), se, time.UTC)
+		RenderData([]byte(ics), se, time.UTC, NewExpandBudget(context.Background()))
 	})
 }
 

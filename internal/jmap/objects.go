@@ -182,18 +182,26 @@ type filter struct {
 	cond  map[string]json.RawMessage
 }
 
+// maxFilterNodes bounds the operators and conditions of one filter.
+const maxFilterNodes = 256
+
 // parseFilter parses a filter; null gives nil (match everything).
 // Conditions may only use the known properties.
 func parseFilter(raw json.RawMessage, known map[string]bool) (*filter, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
-	return parseFilterNode(raw, known, 0)
+	nodes := maxFilterNodes
+	return parseFilterNode(raw, known, 0, &nodes)
 }
 
-func parseFilterNode(raw json.RawMessage, known map[string]bool, depth int) (*filter, error) {
+// parseFilterNode parses one node; nodes is how many more may follow.
+func parseFilterNode(raw json.RawMessage, known map[string]bool, depth int, nodes *int) (*filter, error) {
 	if depth > 32 {
 		return nil, Errorf(ErrUnsupportedFilter, "filter nested too deeply")
+	}
+	if *nodes--; *nodes < 0 {
+		return nil, Errorf(ErrUnsupportedFilter, "filter has more than %d conditions", maxFilterNodes)
 	}
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -209,7 +217,7 @@ func parseFilterNode(raw json.RawMessage, known map[string]bool, depth int) (*fi
 			return nil, Errorf(ErrInvalidArguments, "filter: operator %s needs conditions", f.op)
 		}
 		for _, c := range conds {
-			sub, err := parseFilterNode(c, known, depth+1)
+			sub, err := parseFilterNode(c, known, depth+1, nodes)
 			if err != nil {
 				return nil, err
 			}

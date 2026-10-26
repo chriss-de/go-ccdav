@@ -65,6 +65,7 @@ Unknown keys are rejected. `SIGHUP` reloads the file. See [`config.example.yaml`
 | `ui_prefix` | `/ui/` | URL path of the web UI; must not overlap `dav_prefix`; restart required |
 | `jmap` | `false` | serve JMAP under `jmap_prefix` and `/.well-known/jmap`; restart required |
 | `jmap_prefix` | `/jmap/` | URL path of the JMAP API; must not overlap the other prefixes; restart required |
+| `caldav_per_user` | `false` | in a calendar shared with you read-write, your own alarms, color, categories and free/busy via CalDAV too; see JMAP above; restart required |
 | `base_url` | | public URL, e.g. `https://dav.example.com`; needed for OIDC |
 | `trusted_proxies` | | CIDRs or addresses whose `X-Forwarded-*` headers are trusted |
 | `users.<name>.password` | | hash from `ccdav hash-password`; fallback for DAV, and UI login without OIDC |

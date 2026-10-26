@@ -19,6 +19,12 @@ ui_prefix: /ui/
 # jmap: true
 # jmap_prefix: /jmap/
 
+# In calendars shared with you read-write: your own alarms, color,
+# categories and free/busy via CalDAV too, kept apart from the owner's
+# (as JMAP does), so you don't change everyone's alarms. Read-only
+# shares stay read-only for CalDAV clients. Needs a restart.
+# caldav_per_user: true
+
 # Reverse proxies (CIDRs or addresses) whose X-Forwarded-For is trusted.
 # The real client IP is logged and used for login rate limiting
 # (10 failures per IP and user, 50 per IP, within 15 minutes). Leave empty

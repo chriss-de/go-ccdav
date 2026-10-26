@@ -63,6 +63,10 @@ type Config struct {
 	// Both need a restart.
 	JMAP       bool   `yaml:"jmap,omitempty"`
 	JMAPPrefix string `yaml:"jmap_prefix,omitempty"`
+	// CalDAVPerUser gives everyone their own alarms, color, categories and
+	// free/busy in calendars shared with them, via CalDAV too (the same
+	// per-user data JMAP keeps). Needs a restart.
+	CalDAVPerUser bool `yaml:"caldav_per_user,omitempty"`
 	// BaseURL is the public URL behind the reverse proxy, used for links in
 	// emails (RSVP). DAV hrefs are host-relative and don't need it.
 	BaseURL string              `yaml:"base_url,omitempty"`
@@ -216,8 +220,8 @@ func (s *Store) Reload() error {
 		return err
 	}
 	if old := s.cur.Load(); old != nil && (old.DAVPrefix != c.DAVPrefix || old.UIPrefix != c.UIPrefix || old.DataDir != c.DataDir ||
-		old.JMAP != c.JMAP || old.JMAPPrefix != c.JMAPPrefix) {
-		return fmt.Errorf("%s: changing dav_prefix, ui_prefix, data_dir, jmap or jmap_prefix requires a restart", s.path)
+		old.JMAP != c.JMAP || old.JMAPPrefix != c.JMAPPrefix || old.CalDAVPerUser != c.CalDAVPerUser) {
+		return fmt.Errorf("%s: changing dav_prefix, ui_prefix, data_dir, jmap, jmap_prefix or caldav_per_user requires a restart", s.path)
 	}
 	s.cur.Store(c)
 	return nil

@@ -112,8 +112,8 @@ func run() error {
 	}
 	dataDir := dataDirOf(*dataFlag, cfg.Get())
 	st := store.New(dataDir, server.UIDOf)
-	if cfg.Get().JMAP {
-		st.TrackAccounts()
+	if cfg.Get().JMAP || cfg.Get().CalDAVPerUser {
+		st.TrackAccounts() // per-user data hangs off the account logs' ids
 	}
 	// Load everything up front: listing a user's home must know about
 	// collections other users shared with them.

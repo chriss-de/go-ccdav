@@ -51,6 +51,17 @@ func parseSyncToken(tok, id string) (uint64, error) {
 	return n, nil
 }
 
+// overlaySince is the per-user data version in a sync token of a shared
+// calendar ("...-<n>.<prefs>.<per-user>"), 0 if none.
+func overlaySince(tok string) uint64 {
+	parts := strings.Split(tok, ".")
+	if len(parts) < 3 {
+		return 0
+	}
+	n, _ := strconv.ParseUint(parts[len(parts)-1], 10, 64)
+	return n
+}
+
 // syncCollection implements the DAV:sync-collection REPORT (RFC 6578) on
 // calendars and address books, with sync-level 1.
 func (s *Server) syncCollection(w http.ResponseWriter, user string, res *resource, body *dav.Element) {
@@ -73,7 +84,8 @@ func (s *Server) syncCollection(w http.ResponseWriter, user string, res *resourc
 	}
 	col := res.col
 	id := col.SyncID()
-	since, err := parseSyncToken(strings.TrimSpace(body.Child(dav.NSDAV, "sync-token").Text), id)
+	tok := strings.TrimSpace(body.Child(dav.NSDAV, "sync-token").Text)
+	since, err := parseSyncToken(tok, id)
 	var changes []store.Change
 	var cur uint64
 	if err == nil {
@@ -100,6 +112,19 @@ func (s *Server) syncCollection(w http.ResponseWriter, user string, res *resourc
 			Status: http.StatusInsufficientStorage,
 			Error:  dav.E(dav.N(dav.NSDAV, "number-of-matches-within-limits"), ""),
 		})
+	}
+	// Objects whose per-user data (caldav_per_user) changed since the
+	// token count as changed for this user.
+	if v := s.overlayVersion(res); v >= 0 && since > 0 {
+		have := map[string]bool{}
+		for _, c := range changes {
+			have[c.Name] = true
+		}
+		for _, name := range s.overlayChanges(res, overlaySince(tok)) {
+			if !have[name] {
+				changes = append(changes, store.Change{Name: name, Token: cur})
+			}
+		}
 	}
 	props := propElements(body)
 	for _, c := range changes {

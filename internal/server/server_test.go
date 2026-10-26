@@ -59,6 +59,9 @@ func newServer(t *testing.T, mut func(*config.Config)) (*httptest.Server, *store
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	st := store.New(dir, UIDOf)
+	if cfg.CalDAVPerUser {
+		st.TrackAccounts()
+	}
 	srv := httptest.NewServer(New(cs, st, auth.NewAppPasswords(dir), auth.NewLimiter(), log))
 	t.Cleanup(srv.Close)
 	return srv, st

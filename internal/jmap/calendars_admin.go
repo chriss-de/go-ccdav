@@ -64,7 +64,7 @@ func (c *Call) parseCalendarProps(owner string, obj, current map[string]any) (ca
 			ch.color, err = optString()
 		case "timeZone":
 			if ch.timeZone, err = optString(); err == nil && *ch.timeZone != "" {
-				if _, lerr := time.LoadLocation(*ch.timeZone); lerr != nil {
+				if _, lerr := rrule.LoadZone(*ch.timeZone); lerr != nil {
 					err = bad()
 				}
 			}

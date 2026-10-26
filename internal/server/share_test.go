@@ -1,8 +1,11 @@
 package server
 
 import (
+	"encoding/xml"
+	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -94,7 +97,7 @@ func TestSharing(t *testing.T) {
 	_, out = bob.expect("PROPPATCH", bobCal, `<d:propertyupdate xmlns:d="DAV:" xmlns:a="http://apple.com/ns/ical/"><d:set><d:prop>
 		<a:calendar-color>#00ff00ff</a:calendar-color><d:displayname>Alice's</d:displayname></d:prop></d:set></d:propertyupdate>`, http.StatusMultiStatus)
 	contains(t, out, "200 OK")
-	notContains(t, out, "403")
+	notContains(t, out, "HTTP/1.1 403")
 	_, out = bob.expect("PROPFIND", bobCal, props, http.StatusMultiStatus, "Depth", "0")
 	contains(t, out, "#00ff00ff", "<d:displayname>Alice&#39;s</d:displayname>")
 	_, out = alice.expect("PROPFIND", own, props, http.StatusMultiStatus, "Depth", "0")
@@ -157,5 +160,42 @@ func TestGroupPrincipals(t *testing.T) {
 	contains(t, out, "/dav/principals/groups/fam/")
 	if strings.Count(out, "<d:response>") != 2 {
 		t.Errorf("unexpected listing:\n%s", out)
+	}
+}
+
+// Dead properties the owner stores end up in sharees' responses: those
+// must stay well-formed XML whatever the owner sent.
+func TestDeadPropsWellFormedForSharee(t *testing.T) {
+	srv, st := newServer(t, nil)
+	alice, bob := &client{t, srv, "alice"}, &client{t, srv, "bob"}
+	alice.expect("PROPFIND", "/dav/calendars/alice/", "", http.StatusMultiStatus, "Depth", "1")
+	col, err := st.Collection("alice", store.Calendars, "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	col.SetShares([]store.Share{{User: "bob", Access: "read"}})
+	alice.expect("PROPPATCH", "/dav/calendars/alice/personal/", `<d:propertyupdate xmlns:d="DAV:" xmlns:y="urn:y" xmlns:z="urn:a}b">
+		<d:set><d:prop><y:outer><y:inner>v</y:inner></y:outer><z:c>w</z:c></d:prop></d:set></d:propertyupdate>`, http.StatusMultiStatus)
+	for _, body := range []string{"", `<d:propfind xmlns:d="DAV:"><d:propname/></d:propfind>`} {
+		_, out := bob.expect("PROPFIND", "/dav/calendars/bob/", body, http.StatusMultiStatus, "Depth", "1")
+		d := xml.NewDecoder(strings.NewReader(out))
+		var names []xml.Name
+		for {
+			tok, err := d.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("%q: %v\n%s", body, err, out)
+			}
+			if se, ok := tok.(xml.StartElement); ok {
+				names = append(names, se.Name)
+			}
+		}
+		for _, want := range []xml.Name{{Space: "urn:a}b", Local: "c"}, {Space: "urn:y", Local: "outer"}} {
+			if !slices.Contains(names, want) {
+				t.Errorf("%q: %v missing\n%s", body, want, out)
+			}
+		}
 	}
 }

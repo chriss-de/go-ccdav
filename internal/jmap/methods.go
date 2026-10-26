@@ -172,7 +172,8 @@ type ChangesResponse struct {
 
 // Changes implements Foo/changes (RFC 8620 §5.2) for collections or
 // objects of a kind. In a shared account it only reports what the user
-// can see; moves there, which may cross that boundary, need a resync.
+// can see: a move counts by where the object was and is, as created,
+// destroyed or updated for the user, or not at all.
 func (c *Call) Changes(raw json.RawMessage, kind store.Kind, l store.Level) (*ChangesResponse, error) {
 	var args ChangesArgs
 	if err := DecodeArgs(raw, &args); err != nil {
@@ -208,10 +209,24 @@ func (c *Call) Changes(raw json.RawMessage, kind store.Kind, l store.Level) (*Ch
 	resp := &ChangesResponse{AccountID: args.AccountID, OldState: args.SinceState, NewState: newState,
 		HasMoreChanges: more, Created: []string{}, Updated: []string{}, Destroyed: []string{}}
 	for _, ch := range changes {
-		if !v.Own {
-			if ch.Moved {
+		if !v.Own && ch.Moved {
+			if ch.From == "" && !ch.Created {
+				// Logged before moves recorded their source.
 				return nil, Errorf(ErrCannotCalculateChanges, "objects moved between collections")
 			}
+			before := ch.From != "" && v.Colls[ch.From] != nil
+			after := v.Colls[ch.Coll] != nil && !ch.Deleted
+			switch {
+			case before && after:
+				resp.Updated = append(resp.Updated, ch.ID)
+			case before:
+				resp.Destroyed = append(resp.Destroyed, ch.ID)
+			case after:
+				resp.Created = append(resp.Created, ch.ID)
+			}
+			continue
+		}
+		if !v.Own {
 			coll := ch.Coll
 			if l == store.LevelCollections {
 				coll = ch.ID

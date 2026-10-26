@@ -2,6 +2,9 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -39,4 +42,29 @@ func TestOverlay(t *testing.T) {
 	if o, _ := s2.Overlay("carol", "bob"); o.Version != 0 || len(o.Events) != 0 {
 		t.Fatalf("empty %+v", o)
 	}
+}
+
+// A user's per-user data on someone else's calendar was unbounded, kept
+// in memory and rewritten whole on every change.
+func TestOverlayBounded(t *testing.T) {
+	s := newTracked(t, t.TempDir())
+	c, _ := s.CreateCollection("bob", Calendars, "cal", Meta{})
+	put(t, c, "a")
+	a, _ := s.Account("bob", Calendars)
+	id := objID(t, a, c, "a")
+	big := json.RawMessage(`{"x":"` + strings.Repeat("y", maxOverlayEvent) + `"}`)
+	if err := s.SetOverlay("alice", "bob", id, big); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("event data of %d bytes: %v", len(big), err)
+	}
+	small := json.RawMessage(`{"x":"` + strings.Repeat("y", maxOverlayEvent/2) + `"}`)
+	for i := range maxOverlay/len(small) + 1 {
+		err := s.SetOverlay("alice", "bob", "id"+strconv.Itoa(i), small)
+		if errors.Is(err, ErrTooLarge) {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Fatal("overlay grew past maxOverlay")
 }

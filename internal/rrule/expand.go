@@ -2,6 +2,7 @@ package rrule
 
 import (
 	"container/heap"
+	"context"
 	"iter"
 	"slices"
 	"strings"
@@ -54,6 +55,12 @@ const maxScan = 1_000_000
 // yields nothing but its overrides are still yielded. An unparsable RRULE is
 // ignored (the master is treated as non-recurring).
 func Expand(cal *ical.Component, compName, uid string, from, to time.Time, floating *time.Location) iter.Seq[Occurrence] {
+	return ExpandContext(context.Background(), cal, compName, uid, from, to, floating)
+}
+
+// ExpandContext is Expand that stops early once ctx is done; the caller
+// must check ctx afterwards, as the instances may then be incomplete.
+func ExpandContext(ctx context.Context, cal *ical.Component, compName, uid string, from, to time.Time, floating *time.Location) iter.Seq[Occurrence] {
 	return func(yield func(Occurrence) bool) {
 		if cal == nil {
 			return
@@ -62,7 +69,9 @@ func Expand(cal *ical.Component, compName, uid string, from, to time.Time, float
 			floating = time.UTC
 		}
 		groups := groupComponents(cal, compName, uid)
-		x := &expansion{cal: cal, name: compName, from: from, to: to, floating: floating}
+		work := newBudget()
+		work.ctx = ctx
+		x := &expansion{cal: cal, name: compName, from: from, to: to, floating: floating, work: work}
 		if len(groups) == 1 {
 			for o := range x.group(groups[0]) {
 				if !yield(o) {
@@ -169,6 +178,7 @@ type expansion struct {
 	name     string
 	from, to time.Time
 	floating *time.Location
+	work     *budget // shared by all rules expanded
 }
 
 func (x *expansion) overlaps(o Occurrence) bool {
@@ -427,7 +437,7 @@ func (x *expansion) generate(c *ical.Component, start DateTime) iter.Seq2[time.T
 			if err != nil {
 				continue
 			}
-			next, stop := iter.Pull(r.Iter(start.Time))
+			next, stop := iter.Pull(r.iter(start.Time, x.work))
 			defer stop()
 			if t, ok := next(); ok {
 				pulls = append(pulls, next)

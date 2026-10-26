@@ -27,8 +27,11 @@ ui_prefix: /ui/
 
 # Reverse proxies (CIDRs or addresses) whose X-Forwarded-For is trusted.
 # The real client IP is logged and used for login rate limiting
-# (10 failures per IP and user, 50 per IP, within 15 minutes). Leave empty
-# when ccdav is reachable directly; e.g. the podman network of your proxy:
+# (10 failures per IP and user, 50 per IP or IPv6 /64, within 15 minutes;
+# after 100 failures for one user from anywhere, their password below is
+# refused for the rest of the 15 minutes, app passwords still work).
+# Leave empty when ccdav is reachable directly; e.g. the podman network of
+# your proxy:
 # trusted_proxies: [10.88.0.0/16]
 
 # Public URL behind the reverse proxy. Used for the OIDC redirect URI
@@ -37,7 +40,9 @@ base_url: https://dav.example.com
 
 # Web UI login via OpenID Connect. Without this block the UI accepts the
 # config.yaml password instead. Only users listed below can log in: the
-# username_claim from the userinfo endpoint must equal a user name or email.
+# username_claim from the userinfo endpoint must equal a user name. With
+# username_claim: email it must equal a user's email instead, and the IdP
+# must report it as verified (email_verified).
 # oidc:
 #   issuer: https://auth.example.com/realms/home
 #   client_id: ccdav
@@ -63,6 +68,11 @@ groups:
 # contact per user (name, email) and one group contact per group they're in,
 # for autocomplete. Rebuilt at startup and on SIGHUP. false removes it.
 # directory: true
+
+# How much calendar and contact data each user may own (KB, MB, GB, TB;
+# default: no limit). Writes into a collection shared with you count for
+# its owner. Takes effect on SIGHUP.
+# quota: 2GB
 
 # Used once invitations are implemented (milestone 7).
 # smtp:

@@ -73,6 +73,9 @@ func fastPush(t *testing.T) {
 
 func TestPushStateChanges(t *testing.T) {
 	fastPush(t)
+	// The burst below must fit in one collection window, even with the
+	// fsyncs of 50 writes on a slow CI disk under -race.
+	pushDelay = time.Second
 	e, book, _ := contactsEnv(t)
 	ch, stop := e.openStream("alice", "types=*&closeafter=no&ping=0")
 	defer stop()
@@ -87,12 +90,12 @@ func TestPushStateChanges(t *testing.T) {
 	for i := range 50 {
 		book.Put(fmt.Sprintf("burst-%d.vcf", i), []byte(fmt.Sprintf("BEGIN:VCARD\r\nVERSION:3.0\r\nUID:b%d\r\nFN:B\r\nEND:VCARD\r\n", i)), store.Cond{})
 	}
-	ev, ok := next(t, ch, time.Second)
+	ev, ok := next(t, ch, 3*time.Second)
 	acct, _ := changed(ev)[e.alice].(map[string]any)
 	if !ok || len(acct) != 1 || acct["ContactCard"] == nil || acct["ContactCard"] == own["ContactCard"] {
 		t.Fatalf("after puts %+v", ev)
 	}
-	if extra, ok := next(t, ch, 300*time.Millisecond); ok {
+	if extra, ok := next(t, ch, 1500*time.Millisecond); ok {
 		t.Fatalf("burst gave a second event %+v", extra)
 	}
 	// The pushed state is the one /get reports.

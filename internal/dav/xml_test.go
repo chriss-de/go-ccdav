@@ -23,7 +23,7 @@ func TestParseXML(t *testing.T) {
 	if len(prop.Children) != 3 || prop.Children[1].Name != N(NSCalDAV, "calendar-home-set") {
 		t.Fatalf("children %+v", prop.Children)
 	}
-	if foo := prop.Child("urn:custom", "foo"); foo.Inner != "bar <x:b>baz</x:b>" {
+	if foo := prop.Child("urn:custom", "foo"); foo.Inner != `bar <n:b xmlns:n="urn:custom">baz</n:b>` {
 		t.Errorf("inner %q", foo.Inner)
 	}
 	if e, err := ParseXML(strings.NewReader("  ")); e != nil || err != nil {
@@ -68,5 +68,47 @@ func TestParseXMLManyTextChunks(t *testing.T) {
 	// generous bound keeps this stable under -race and on slow CI runners.
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("took %v", d)
+	}
+}
+
+// Namespaces may contain "}", local names can't: keys must round-trip.
+func TestKeyRoundTrip(t *testing.T) {
+	for _, n := range []xml.Name{N("urn:a}b", "c"), N("", "d"), N(NSDAV, "displayname"), N("}", "x")} {
+		if got := ParseKey(Key(n)); got != n {
+			t.Errorf("ParseKey(Key(%v)) = %v", n, got)
+		}
+	}
+}
+
+// Inner is stored as a dead property and later written into other
+// documents, without the request's namespace declarations: it has to
+// declare what it uses.
+func TestInnerIsSelfContained(t *testing.T) {
+	body := `<d:propertyupdate xmlns:d="DAV:" xmlns:y="urn:y" xmlns:z="urn:z"><d:prop>` +
+		`<y:p>a &amp; b <y:b z:attr="1" plain="2">c</y:b><!-- note --><d:e/></y:p></d:prop></d:propertyupdate>`
+	e, err := ParseXML(strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := e.Child(NSDAV, "prop").Child("urn:y", "p")
+	doc := "<root>" + E(N("urn:y", "p"), p.Inner) + "</root>"
+	re, err := ParseXML(strings.NewReader(doc))
+	if err != nil {
+		t.Fatalf("%v\n%s", err, doc)
+	}
+	got := re.Children[0]
+	if got.Text != "a & b " || len(got.Children) != 2 {
+		t.Fatalf("%q %d\n%s", got.Text, len(got.Children), doc)
+	}
+	b := got.Children[0]
+	if b.Name != N("urn:y", "b") || b.Attr("plain") != "2" || got.Children[1].Name != N(NSDAV, "e") {
+		t.Fatalf("%+v\n%s", b, doc)
+	}
+	found := false
+	for _, a := range b.Attrs {
+		found = found || a.Name == N("urn:z", "attr") && a.Value == "1"
+	}
+	if !found {
+		t.Fatalf("namespaced attribute lost: %+v\n%s", b.Attrs, doc)
 	}
 }

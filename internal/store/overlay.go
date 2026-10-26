@@ -31,6 +31,13 @@ type OverlayEvent struct {
 	Data json.RawMessage `json:"data,omitempty"`
 }
 
+// Bounds of a user's per-user data for one owner: per event, and all of
+// it (it is kept in memory and rewritten whole on every change).
+const (
+	maxOverlayEvent = 64 << 10
+	maxOverlay      = 4 << 20
+)
+
 type overlays struct {
 	mu    sync.Mutex
 	cache map[string]*Overlay // "<user>/<owner>"
@@ -88,8 +95,12 @@ func (s *Store) Overlay(user, owner string) (Overlay, error) {
 }
 
 // SetOverlay sets user's data for an event of owner's (nil: back to the
-// owner's values). An unchanged value is not a change.
+// owner's values). An unchanged value is not a change. ErrTooLarge: the
+// data is over maxOverlayEvent, or would take the overlay over maxOverlay.
 func (s *Store) SetOverlay(user, owner, eventID string, data json.RawMessage) error {
+	if len(data) > maxOverlayEvent {
+		return ErrTooLarge
+	}
 	s.over.mu.Lock()
 	o, err := s.loadOverlay(user, owner)
 	if err != nil {
@@ -100,6 +111,18 @@ func (s *Store) SetOverlay(user, owner, eventID string, data json.RawMessage) er
 	if had && string(old.Data) == string(data) || !had && data == nil {
 		s.over.mu.Unlock()
 		return nil
+	}
+	if len(data) > len(old.Data) {
+		size := len(data)
+		for id, ev := range o.Events {
+			if id != eventID {
+				size += len(id) + len(ev.Data)
+			}
+		}
+		if size > maxOverlay {
+			s.over.mu.Unlock()
+			return ErrTooLarge
+		}
 	}
 	next := &Overlay{Version: o.Version + 1, Events: maps.Clone(o.Events)}
 	next.Events[eventID] = OverlayEvent{V: next.Version, Data: slices.Clone(data)}

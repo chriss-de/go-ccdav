@@ -1,6 +1,8 @@
 package caldav
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -16,10 +18,30 @@ const (
 	dateFormat = "20060102"
 )
 
+// MaxExpandBytes bounds what expand may produce for one request: a tiny
+// FREQ=SECONDLY object could otherwise expand to gigabytes.
+const MaxExpandBytes = 32 << 20
+
+// ErrExpandTooLarge is returned when expanding exceeds an ExpandBudget.
+var ErrExpandTooLarge = errors.New("caldav: expanded data too large")
+
+// ExpandBudget is what expanding may still produce for one request, in
+// bytes of the instances' source components, and the request's context,
+// which stops expanding when done; shared by all objects of a REPORT.
+type ExpandBudget struct {
+	left int
+	ctx  context.Context
+}
+
+// NewExpandBudget returns a budget of MaxExpandBytes for a request.
+func NewExpandBudget(ctx context.Context) *ExpandBudget {
+	return &ExpandBudget{left: MaxExpandBytes, ctx: ctx}
+}
+
 // RenderData applies a CALDAV:calendar-data request element to a stored
 // object. With no expand and no comp selection the raw bytes are returned
-// unchanged.
-func RenderData(raw []byte, spec *dav.Element, floating *time.Location) (string, error) {
+// unchanged. Expanding draws on budget.
+func RenderData(raw []byte, spec *dav.Element, floating *time.Location, budget *ExpandBudget) (string, error) {
 	if spec == nil || len(spec.Children) == 0 {
 		return string(raw), nil
 	}
@@ -32,7 +54,9 @@ func RenderData(raw []byte, spec *dav.Element, floating *time.Location) (string,
 		if err != nil {
 			return "", err
 		}
-		cal = Expand(cal, from, to, floating)
+		if cal, err = Expand(cal, from, to, floating, budget); err != nil {
+			return "", err
+		}
 	}
 	if c := spec.Child(dav.NSCalDAV, "comp"); c != nil {
 		cal = selectComp(cal, c)
@@ -42,8 +66,10 @@ func RenderData(raw []byte, spec *dav.Element, floating *time.Location) (string,
 
 // Expand returns a copy of cal in which every recurring component is
 // replaced by its instances in [from, to), each with a RECURRENCE-ID, and
-// all date-times converted to UTC (RFC 4791 §9.6.5).
-func Expand(cal *ical.Component, from, to time.Time, floating *time.Location) *ical.Component {
+// all date-times converted to UTC (RFC 4791 §9.6.5). Each instance costs
+// budget the size of its source component; once the budget's context is
+// done, Expand fails with its error.
+func Expand(cal *ical.Component, from, to time.Time, floating *time.Location, budget *ExpandBudget) (*ical.Component, error) {
 	out := &ical.Component{Name: cal.Name}
 	for _, p := range cal.Props {
 		if p.Name != "METHOD" {
@@ -51,8 +77,17 @@ func Expand(cal *ical.Component, from, to time.Time, floating *time.Location) *i
 		}
 	}
 	seen := map[*ical.Component]bool{}
+	size := map[*ical.Component]int{}
 	for _, name := range CalendarComponents {
-		for o := range rrule.Expand(cal, name, "", from, to, floating) {
+		for o := range rrule.ExpandContext(budget.ctx, cal, name, "", from, to, floating) {
+			n, ok := size[o.Comp]
+			if !ok {
+				n = len(o.Comp.Bytes())
+				size[o.Comp] = n
+			}
+			if budget.left -= n; budget.left < 0 {
+				return nil, ErrExpandTooLarge
+			}
 			seen[o.Comp] = true
 			out.Children = append(out.Children, instance(cal, o, floating))
 		}
@@ -68,7 +103,10 @@ func Expand(cal *ical.Component, from, to time.Time, floating *time.Location) *i
 		}
 		out.Children = append(out.Children, toUTC(cal, cloneComp(c), floating))
 	}
-	return out
+	if err := budget.ctx.Err(); err != nil {
+		return nil, err // stopped early: the instances are incomplete
+	}
+	return out, nil
 }
 
 func recurring(cal *ical.Component, c *ical.Component) bool {

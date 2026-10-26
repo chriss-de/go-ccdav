@@ -1,9 +1,13 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
+	"maps"
+	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -38,6 +42,8 @@ type env struct {
 	t   *testing.T
 	srv *httptest.Server
 	st  *store.Store
+	dir string // data directory
+	cfg *config.Store
 }
 
 func newEnv(t *testing.T, mut func(*config.Config)) *env {
@@ -65,13 +71,13 @@ func newEnv(t *testing.T, mut func(*config.Config)) *env {
 	defaults := map[store.Kind]map[string]store.Meta{store.Calendars: server.DefaultCalendars, store.AddressBooks: server.DefaultAddressBooks}
 	mux := http.NewServeMux()
 	lim := auth.NewLimiter()
-	ui := New(cs, st, ap, lim, []byte("0123456789abcdef0123456789abcdef"), defaults, log)
+	ui := New(cs, st, ap, auth.NewSessions(dir), lim, []byte("0123456789abcdef0123456789abcdef"), defaults, log)
 	mux.Handle(cs.Get().UIPrefix, ui)
 	mux.HandleFunc("GET /{$}", ui.Landing)
 	mux.Handle("/", server.New(cs, st, ap, lim, log))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	return &env{t, srv, st}
+	return &env{t, srv, st, dir, cs}
 }
 
 // browser is a cookie-keeping client that does not follow redirects.
@@ -137,7 +143,7 @@ func (b *browser) post(path string, status int, kv ...string) string {
 
 func (b *browser) login(user string) {
 	b.e.t.Helper()
-	b.expect("POST", b.ui+"login", url.Values{"user": {user}, "password": {"pw"}}, http.StatusSeeOther)
+	b.expect("POST", b.ui+"login", b.loginForm(user, "pw"), http.StatusSeeOther)
 }
 
 func (e *env) dav(method, path, user, pw string) int {
@@ -182,7 +188,7 @@ func TestPasswordLoginAndCSRF(t *testing.T) {
 	out := b.expect("GET", "/ui/", nil, http.StatusOK)
 	contains(t, out, `name="password"`)
 	b.expect("GET", "/ui", nil, http.StatusTemporaryRedirect) // ServeMux adds the slash
-	b.expect("POST", "/ui/login", url.Values{"user": {"alice"}, "password": {"wrong"}}, http.StatusForbidden)
+	b.expect("POST", "/ui/login", b.loginForm("alice", "wrong"), http.StatusForbidden)
 	b.login("alice")
 	resp, out := b.do("GET", "/ui/", nil)
 	contains(t, out, "Connect a device", "Calendars", "Address books", "Personal", "VEVENT", "VTODO", "VJOURNAL", "Contacts")
@@ -210,6 +216,27 @@ func TestPasswordLoginAndCSRF(t *testing.T) {
 	contains(t, b.expect("GET", "/ui/", nil, http.StatusOK), `name="password"`)
 	// Anonymous POSTs go to the login page.
 	e.browser().expect("POST", "/ui/collections", url.Values{}, http.StatusSeeOther)
+}
+
+// The login form is open to anyone: no large or multipart bodies.
+func TestLoginBodyLimits(t *testing.T) {
+	e := newEnv(t, nil)
+	b := e.browser()
+	b.expect("POST", "/ui/login", url.Values{"user": {"alice"}, "password": {strings.Repeat("x", 100<<10)}}, http.StatusBadRequest)
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	mw.WriteField("user", "alice")
+	mw.WriteField("password", "pw")
+	mw.Close()
+	resp, err := http.Post(e.srv.URL+"/ui/login", mw.FormDataContentType(), &body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusSeeOther {
+		t.Fatal("multipart login accepted")
+	}
+	b.login("alice") // a normal form still works
 }
 
 func TestAppPasswordsUI(t *testing.T) {
@@ -369,6 +396,11 @@ func TestCollectionsAndSharingUI(t *testing.T) {
 
 // fakeIdP implements discovery, token and userinfo endpoints.
 func fakeIdP(t *testing.T, claim string) *httptest.Server {
+	return fakeIdPInfo(t, map[string]any{"sub": "1", "preferred_username": claim, "email": claim + "@idp"})
+}
+
+// fakeIdPInfo is fakeIdP answering userinfo with info.
+func fakeIdPInfo(t *testing.T, info map[string]any) *httptest.Server {
 	var idp *httptest.Server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
@@ -393,7 +425,7 @@ func fakeIdP(t *testing.T, claim string) *httptest.Server {
 			http.Error(w, "no", http.StatusUnauthorized)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]string{"sub": "1", "preferred_username": claim, "email": claim + "@idp"})
+		json.NewEncoder(w).Encode(info)
 	})
 	idp = httptest.NewServer(mux)
 	t.Cleanup(idp.Close)
@@ -445,6 +477,37 @@ func TestOIDCLogin(t *testing.T) {
 		b.expect("GET", "/ui/callback?code=good-code&state="+state, nil, http.StatusForbidden)
 		// Cancelled at the provider.
 		b.expect("GET", "/ui/callback?error=access_denied", nil, http.StatusForbidden)
+	}
+}
+
+// OIDC matched any claim against user names and emails and ignored
+// email_verified: whoever could set an IdP username or an unverified email
+// to alice@example.com logged in as alice.
+func TestOIDCClaimMatching(t *testing.T) {
+	for _, tc := range []struct {
+		claim string
+		info  map[string]any
+		ok    bool
+	}{
+		{"preferred_username", map[string]any{"preferred_username": "alice"}, true},
+		{"preferred_username", map[string]any{"preferred_username": "alice@example.com"}, false},
+		{"email", map[string]any{"email": "Alice@Example.com", "email_verified": true}, true},
+		{"email", map[string]any{"email": "alice@example.com", "email_verified": false}, false},
+		{"email", map[string]any{"email": "alice@example.com"}, false},
+		{"email", map[string]any{"email": "alice", "email_verified": true}, false},
+	} {
+		tc.info["sub"] = "1"
+		idp := fakeIdPInfo(t, tc.info)
+		e := newEnv(t, func(c *config.Config) {
+			c.BaseURL = "http://ccdav.test"
+			c.OIDC = &config.OIDC{Issuer: idp.URL, ClientID: "ccdav", ClientSecret: "s", UsernameClaim: tc.claim}
+		})
+		b := e.browser()
+		resp, _ := b.do("GET", "/ui/login", nil)
+		resp, _ = b.do("GET", "/ui/callback?code=good-code&state="+mustState(t, resp), nil)
+		if got := resp.StatusCode == http.StatusSeeOther; got != tc.ok {
+			t.Errorf("%s %v: logged in %v, want %v", tc.claim, tc.info, got, tc.ok)
+		}
 	}
 }
 
@@ -529,4 +592,174 @@ func TestLanding(t *testing.T) {
 
 	e2 := newEnv(t, func(c *config.Config) { c.BaseURL = "https://dav.example.com" })
 	contains(t, e2.browser().expect("GET", "/", nil, http.StatusOK), "<code>dav.example.com</code>")
+}
+
+// Unknown users were refused without hashing: the answer came ~300 times
+// faster than for a real user, telling which names exist.
+func TestLoginTimingSameForUnknownUsers(t *testing.T) {
+	e := newEnv(t, nil)
+	b := e.browser()
+	timeOf := func(user string) time.Duration {
+		f := b.loginForm(user, "wrong")
+		start := time.Now()
+		b.expect("POST", "/ui/login", f, http.StatusForbidden)
+		return time.Since(start)
+	}
+	timeOf("alice") // warm up
+	known, unknown := timeOf("alice"), timeOf("nobody")
+	if unknown < known/4 {
+		t.Fatalf("known user %v, unknown %v", known, unknown)
+	}
+}
+
+// Internal errors (file system paths and the like) went to the page; the
+// log is the place for them.
+func TestInternalErrorsNotShown(t *testing.T) {
+	dir := t.TempDir()
+	b, _ := yaml.Marshal(config.Config{Users: map[string]config.User{"alice": {Password: testHash()}}})
+	os.WriteFile(filepath.Join(dir, "config.yaml"), b, 0o600)
+	cs, err := config.NewStore(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.New(dir, server.UIDOf)
+	ui := New(cs, st, auth.NewAppPasswords(dir), auth.NewSessions(dir), auth.NewLimiter(), []byte("0123456789abcdef0123456789abcdef"), nil,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := httptest.NewRecorder()
+	ui.renderError(w, httptest.NewRequest("POST", "/ui/collections", nil), "alice", "",
+		errors.New("open /var/lib/ccdav/users/alice/x: permission denied"))
+	if strings.Contains(w.Body.String(), "/var/lib/ccdav") {
+		t.Fatal("internal error shown on the page")
+	}
+	w = httptest.NewRecorder()
+	ui.renderError(w, httptest.NewRequest("POST", "/ui/collections", nil), "alice", "", errUser("No such collection."))
+	contains(t, w.Body.String(), "No such collection.")
+}
+
+// sessionCookieOf returns the browser's session cookie value.
+func (b *browser) sessionCookieOf() string {
+	u, _ := url.Parse(b.e.srv.URL + b.ui)
+	for _, c := range b.c.Jar.Cookies(u) {
+		if c.Name == sessionCookie {
+			return c.Value
+		}
+	}
+	b.e.t.Fatal("no session cookie")
+	return ""
+}
+
+// loggedIn reports whether a request with the session cookie value gets
+// the dashboard.
+func (e *env) loggedIn(cookie string) bool {
+	req, _ := http.NewRequest("GET", e.srv.URL+"/ui/", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+	return strings.Contains(string(out), "Connect a device")
+}
+
+// Sessions lived in the cookie alone: a copied cookie kept working for
+// 12 hours after logout, and after the user's password was changed.
+func TestSessionsRevocable(t *testing.T) {
+	e := newEnv(t, nil)
+	a, other := e.browser(), e.browser()
+	a.login("alice")
+	other.login("alice")
+	old, kept := a.sessionCookieOf(), other.sessionCookieOf()
+	if !e.loggedIn(old) {
+		t.Fatal("fresh session not accepted")
+	}
+	a.post("logout", http.StatusSeeOther)
+	if e.loggedIn(old) || e.loggedIn(kept) {
+		t.Fatal("session still valid after logout")
+	}
+	a.login("alice")
+	cur := a.sessionCookieOf()
+	if !e.loggedIn(cur) {
+		t.Fatal("new login not accepted")
+	}
+	// A new password in config.yaml ends the sessions too.
+	h, _ := auth.Hash("new")
+	c := *e.cfg.Get()
+	c.Users = maps.Clone(c.Users)
+	u := c.Users["alice"]
+	u.Password = h
+	c.Users["alice"] = u
+	b, _ := yaml.Marshal(c)
+	os.WriteFile(filepath.Join(e.dir, "config.yaml"), b, 0o600)
+	if err := e.cfg.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if e.loggedIn(cur) {
+		t.Fatal("session still valid after a password change")
+	}
+}
+
+// Secure depended on base_url or a trusted proxy saying https: behind a
+// TLS proxy without either, session cookies could leak over plain HTTP.
+func TestSessionCookieSecure(t *testing.T) {
+	e := newEnv(t, nil)
+	for host, want := range map[string]bool{"dav.example.com": true, "localhost:8080": false, "127.0.0.1:8080": false, "[::1]:8080": false} {
+		page, _ := http.NewRequest("GET", e.srv.URL+"/ui/", nil)
+		page.Host = host
+		resp, err := http.DefaultTransport.RoundTrip(page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		m := loginRe.FindStringSubmatch(string(out))
+		if m == nil || len(resp.Cookies()) != 1 {
+			t.Fatalf("login page: %v", resp.Cookies())
+		}
+		req, _ := http.NewRequest("POST", e.srv.URL+"/ui/login", strings.NewReader("user=alice&password=pw&login="+m[1]))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(resp.Cookies()[0])
+		req.Host = host
+		resp, err = http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		var got *http.Cookie
+		for _, c := range resp.Cookies() {
+			if c.Name == sessionCookie {
+				got = c
+			}
+		}
+		if got == nil || got.Secure != want {
+			t.Errorf("Host %s: cookie %v, want Secure=%v", host, got, want)
+		}
+	}
+}
+
+var loginRe = regexp.MustCompile(`name="login" value="([0-9a-f]+)"`)
+
+// loginForm loads the login page, as a browser would before posting it,
+// and returns the form with its token.
+func (b *browser) loginForm(user, pw string) url.Values {
+	b.e.t.Helper()
+	m := loginRe.FindStringSubmatch(b.expect("GET", b.ui, nil, http.StatusOK))
+	if m == nil {
+		b.e.t.Fatal("no login token on the login page")
+	}
+	return url.Values{"user": {user}, "password": {pw}, "login": {m[1]}}
+}
+
+// The login form took any POST: another site could log a visitor into the
+// attacker's account (whose calendar they'd then fill).
+func TestLoginCSRF(t *testing.T) {
+	e := newEnv(t, nil)
+	e.browser().expect("POST", "/ui/login", url.Values{"user": {"alice"}, "password": {"pw"}}, http.StatusForbidden)
+	b := e.browser()
+	f := b.loginForm("alice", "pw")
+	other := e.browser() // the token without its cookie
+	other.expect("POST", "/ui/login", f, http.StatusForbidden)
+	f.Set("login", strings.Repeat("0", 32))
+	b.expect("POST", "/ui/login", f, http.StatusForbidden)
+	b.expect("POST", "/ui/login", b.loginForm("alice", "pw"), http.StatusSeeOther)
 }

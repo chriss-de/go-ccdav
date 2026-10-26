@@ -1,7 +1,11 @@
 package jmap
 
 import (
+	"fmt"
+	"net/http"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -160,5 +164,147 @@ func TestPerUserPush(t *testing.T) {
 	}
 	if ev, ok := next(t, bob, 300*time.Millisecond); ok {
 		t.Fatalf("bob told about alice's color: %+v", ev)
+	}
+}
+
+// A reader's reduced view (reduceParticipants, an override window) must
+// not leak into the cached conversion that others see and edits build on.
+func TestReducedGetKeepsCache(t *testing.T) {
+	e, team, meeting, standup := sharedCalendar(t)
+	count := func(id, prop string) int {
+		m, _ := e.eventAs("bob", e.bob, id, prop)[prop].(map[string]any)
+		return len(m)
+	}
+	parts, overs := count(meeting, "participants"), count(standup, "recurrenceOverrides")
+	if parts < 2 || overs < 1 {
+		t.Fatalf("fixture: %d participants, %d overrides", parts, overs)
+	}
+	e.api("alice", call("CalendarEvent/get", map[string]any{"accountId": e.bob, "ids": []string{meeting}, "reduceParticipants": true}, "g"))
+	e.api("alice", call("CalendarEvent/get", map[string]any{"accountId": e.bob, "ids": []string{standup},
+		"recurrenceOverridesAfter": "2100-01-01T00:00:00Z"}, "g"))
+	if p, o := count(meeting, "participants"), count(standup, "recurrenceOverrides"); p != parts || o != overs {
+		t.Fatalf("after alice's reduced gets bob sees %d participants (want %d), %d overrides (want %d)", p, parts, o, overs)
+	}
+	before, _, _ := team.Get("moved_deleted.ics")
+	r := e.api("bob", call("CalendarEvent/set", map[string]any{"accountId": e.bob,
+		"update": map[string]any{standup: map[string]any{"title": "renamed"}}}, "s"))[0]
+	if _, ok := r.Args["updated"].(map[string]any)[standup]; !ok {
+		t.Fatalf("update: %+v", r.Args)
+	}
+	after, _, _ := team.Get("moved_deleted.ics")
+	if n, m := strings.Count(string(before), "RECURRENCE-ID"), strings.Count(string(after), "RECURRENCE-ID"); n != m {
+		t.Fatalf("RECURRENCE-ID lines %d -> %d", n, m)
+	}
+}
+
+// Blobs were kept per account owner: a read-only sharee could download or
+// parse whatever anyone uploaded into the account, given the id (a hash
+// of the content). Now each upload belongs to its uploader.
+func TestBlobsBelongToUploader(t *testing.T) {
+	e, _, _, _ := sharedCalendar(t)
+	ics := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:p\r\nDTSTART:20260101T000000Z\r\nSUMMARY:salary talk\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	upload := func(user string) string {
+		resp := e.do(user, "POST", "/jmap/upload/"+e.bob+"/", "text/calendar", []byte(ics))
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("%s upload: %d", user, resp.StatusCode)
+		}
+		return decode[uploadResponse](t, resp).BlobID
+	}
+	parsed := func(user, id string) bool {
+		r := e.api(user, call("CalendarEvent/parse", map[string]any{"accountId": e.bob, "blobIds": []string{id}}, "0"))[0]
+		p, _ := r.Args["parsed"].(map[string]any)
+		return p[id] != nil
+	}
+	download := func(user, id string) int {
+		resp := e.do(user, "GET", "/jmap/download/"+e.bob+"/"+id+"/x.ics", "", nil)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	id := upload("bob")
+	if download("bob", id) != http.StatusOK || !parsed("bob", id) {
+		t.Fatal("the uploader can't use the blob")
+	}
+	for _, other := range []string{"alice", "carol"} {
+		if st := download(other, id); st != http.StatusNotFound {
+			t.Errorf("%s downloaded bob's upload: %d", other, st)
+		}
+		if parsed(other, id) {
+			t.Errorf("%s parsed bob's upload", other)
+		}
+	}
+	if id := upload("carol"); download("carol", id) != http.StatusOK || !parsed("carol", id) {
+		t.Error("a read-write sharee can't use their own upload")
+	}
+}
+
+// A move between two of the owner's private calendars made a sharee's
+// /changes fail ("objects moved"), telling them about activity they
+// can't see. Now moves are judged by where the object was and is.
+func TestChangesHideMovesOutOfSight(t *testing.T) {
+	e, team, _, _ := sharedCalendar(t)
+	p1, _ := e.st.CreateCollection("bob", store.Calendars, "p1", store.Meta{})
+	p2, _ := e.st.CreateCollection("bob", store.Calendars, "p2", store.Meta{})
+	ics := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:%s\r\nDTSTART:20260101T000000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	p1.Put("x.ics", []byte(fmt.Sprintf(ics, "x")), store.Cond{})
+	p1.Put("y.ics", []byte(fmt.Sprintf(ics, "y")), store.Cond{})
+	log, _ := e.st.Account("bob", store.Calendars)
+	y, _ := log.ObjectID(p1, "y.ics")
+	state := func() string {
+		r := e.api("alice", call("CalendarEvent/get", map[string]any{"accountId": e.bob, "ids": []string{}}, "0"))[0]
+		return r.Args["state"].(string)
+	}
+	changes := func(since string) apiResp {
+		return e.api("alice", call("CalendarEvent/changes", map[string]any{"accountId": e.bob, "sinceState": since}, "0"))[0]
+	}
+	s0 := state()
+	if _, err := p1.Move("x.ics", p2, "x.ics", store.Cond{}); err != nil {
+		t.Fatal(err)
+	}
+	if r := changes(s0); errType(r) != "" || len(ids2list(r.Args["created"]))+len(ids2list(r.Args["updated"]))+len(ids2list(r.Args["destroyed"])) != 0 {
+		t.Fatalf("private move: %.300v", r)
+	}
+	s1 := state()
+	if _, err := p1.Move("y.ics", team, "y.ics", store.Cond{}); err != nil {
+		t.Fatal(err)
+	}
+	if r := changes(s1); errType(r) != "" || !slices.Equal(ids2list(r.Args["created"]), []string{y}) {
+		t.Fatalf("move into sight: %.300v", r)
+	}
+	s2 := state()
+	if _, err := team.Move("y.ics", p2, "y.ics", store.Cond{}); err != nil {
+		t.Fatal(err)
+	}
+	if r := changes(s2); errType(r) != "" || !slices.Equal(ids2list(r.Args["destroyed"]), []string{y}) {
+		t.Fatalf("move out of sight: %.300v", r)
+	}
+	// The state tells the same: unchanged by the private move, changed
+	// when an event left the shared calendar.
+	if s1 != s0 {
+		t.Error("a private move changed the sharee's state")
+	}
+	if state() == s2 {
+		t.Error("a move out of the shared calendar left the sharee's state as it was")
+	}
+}
+
+// Uploads are kept for a day; without a cap per user they could fill the
+// disk.
+func TestPendingUploadsCapped(t *testing.T) {
+	defer func(n int64) { maxPendingUploads = n }(maxPendingUploads)
+	maxPendingUploads = 1000
+	e := newEnv(t)
+	up := func(n int) int {
+		resp := e.do("alice", "POST", "/jmap/upload/"+e.alice+"/", "application/octet-stream", []byte(strings.Repeat("x", n)+strconv.Itoa(n)))
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if st := up(600); st != http.StatusCreated {
+		t.Fatal(st)
+	}
+	if st := up(601); st != http.StatusRequestEntityTooLarge {
+		t.Fatalf("past the cap: %d", st)
+	}
+	if st := up(300); st != http.StatusCreated {
+		t.Fatalf("within the cap: %d", st)
 	}
 }

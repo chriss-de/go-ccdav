@@ -53,7 +53,8 @@ const (
 
 type acctEntry struct {
 	Token, Born, Moved uint64
-	BornAt             int64 // Unix seconds
+	MovedFrom          string // on the move's own entry: the collection it left
+	BornAt             int64  // Unix seconds
 	Level              Level
 	ID, Coll, Hash     string
 	Name               string
@@ -71,7 +72,11 @@ func (e acctEntry) line() string {
 	if name == "" {
 		name = "-"
 	}
-	return fmt.Sprintf("%d %s %c %s %d %d %d %s %s %s\n", e.Token, op, e.Level, e.ID, e.Born, e.BornAt, e.Moved, coll, hash, name)
+	moved := strconv.FormatUint(e.Moved, 10)
+	if e.MovedFrom != "" {
+		moved += "@" + e.MovedFrom // older logs have the token only
+	}
+	return fmt.Sprintf("%d %s %c %s %d %d %s %s %s %s\n", e.Token, op, e.Level, e.ID, e.Born, e.BornAt, moved, coll, hash, name)
 }
 
 func parseAcctLine(s string) (acctEntry, bool) {
@@ -84,7 +89,9 @@ func parseAcctLine(s string) (acctEntry, bool) {
 	e.Token, err1 = strconv.ParseUint(f[0], 10, 64)
 	e.Born, err2 = strconv.ParseUint(f[4], 10, 64)
 	e.BornAt, err3 = strconv.ParseInt(f[5], 10, 64)
-	e.Moved, err4 = strconv.ParseUint(f[6], 10, 64)
+	moved, from, _ := strings.Cut(f[6], "@")
+	e.Moved, err4 = strconv.ParseUint(moved, 10, 64)
+	e.MovedFrom = from
 	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
 		return acctEntry{}, false
 	}
@@ -407,7 +414,7 @@ func (a *Account) noteMove(from *Collection, name string, to *Collection, o Obje
 	if id, ok := a.byLoc[from.id()+"/"+name]; ok {
 		old := a.cur[string(LevelObjects)+id]
 		e.ID, e.Born, e.BornAt = id, old.Born, old.BornAt
-		e.Moved = a.token + 1
+		e.Moved, e.MovedFrom = a.token+1, from.id()
 	} else {
 		e.ID = a.newObjectID()
 	}
@@ -492,7 +499,8 @@ func (a *Account) StateIn(l Level, colls map[string]bool) (home string, token ui
 		if l == LevelCollections {
 			coll = e.ID
 		}
-		if e.Level == l && colls[coll] {
+		// A move also concerns the collection it left.
+		if e.Level == l && (colls[coll] || e.Moved == e.Token && colls[e.MovedFrom]) {
 			token = max(token, e.Token)
 		}
 	}
@@ -506,6 +514,9 @@ type AccountChange struct {
 	Created bool   // the id didn't exist at the old token
 	Deleted bool
 	Moved   bool // moved to another collection since the old token
+	// From is the collection at the old token: "" if created since, or
+	// for a move logged before moves recorded their source.
+	From string
 }
 
 // Changes returns what changed at level l since token since, one entry
@@ -520,6 +531,7 @@ func (a *Account) Changes(l Level, since uint64, maxIDs int) (out []AccountChang
 		return nil, last, false, ErrInvalidToken
 	}
 	newest := map[string]acctEntry{}
+	first := map[string]acctEntry{} // where each id was at since
 	var order []string
 	next = last
 	for i, e := range a.log {
@@ -533,6 +545,7 @@ func (a *Account) Changes(l Level, since uint64, maxIDs int) (out []AccountChang
 				break
 			}
 			order = append(order, e.ID)
+			first[e.ID] = e
 		}
 		newest[e.ID] = e
 	}
@@ -542,7 +555,15 @@ func (a *Account) Changes(l Level, since uint64, maxIDs int) (out []AccountChang
 		if created && e.Deleted {
 			continue
 		}
-		out = append(out, AccountChange{ID: id, Coll: e.Coll, Created: created, Deleted: e.Deleted, Moved: e.Moved > since})
+		from := ""
+		switch f := first[id]; {
+		case created:
+		case f.Moved == f.Token: // the first change is a move: it left From
+			from = f.MovedFrom
+		default:
+			from = f.Coll
+		}
+		out = append(out, AccountChange{ID: id, Coll: e.Coll, Created: created, Deleted: e.Deleted, Moved: e.Moved > since, From: from})
 	}
 	return out, next, more, nil
 }
@@ -620,6 +641,9 @@ func (s *Store) Account(owner string, kind Kind) (*Account, error) {
 func (s *Store) account(owner string, kind Kind) (*Account, error) {
 	if !s.track {
 		return nil, errors.New("store: account tracking is off")
+	}
+	if !validHome(owner, kind) {
+		return nil, ErrNotFound
 	}
 	key := owner + "/" + string(kind)
 	if a, ok := s.accts[key]; ok {

@@ -1,17 +1,17 @@
-# Checks every push and pull request; builds the container image and, for
-# pushes, publishes it to Docker Hub.
+# Checks every push to main and every pull request, and builds the
+# container image; version tags (v*) also publish it to Docker Hub.
 #
 # Setup (repository settings → Secrets and variables → Actions):
 #   secret   DOCKERHUB_USERNAME    Docker Hub user
 #   secret   DOCKERHUB_TOKEN       Docker Hub access token (Read & Write)
 #   variable DOCKERHUB_REPOSITORY  image name without registry, e.g. chrissde/ccdav
 #
-# Tags: pushes to master → edge, sha-<short>; tag v1.2.3 → 1.2.3, 1.2, 1, latest.
+# Image tags: git tag v1.2.3 → 1.2.3, 1.2, 1, latest (v0.x: no major tag).
 name: ci
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -49,7 +49,7 @@ jobs:
     needs: check
     runs-on: ubuntu-latest
     env:
-      PUSH: ${{ github.event_name != 'pull_request' }}
+      PUSH: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -62,7 +62,7 @@ jobs:
             if [ "$PUSH" = true ]; then
               echo "::error::set the repository variable DOCKERHUB_REPOSITORY (e.g. chrissde/ccdav)"; exit 1
             fi
-            repo=local/ccdav # pull requests only build
+            repo=local/ccdav # branches and pull requests only build
           fi
           echo "image=docker.io/$repo" >> "$GITHUB_OUTPUT"
           echo "version=$(git describe --tags --always --dirty)" >> "$GITHUB_OUTPUT"
@@ -71,8 +71,6 @@ jobs:
         with:
           images: ${{ steps.name.outputs.image }}
           tags: |
-            type=edge,branch=master
-            type=sha
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}

@@ -38,10 +38,11 @@ func N(ns, local string) xml.Name { return xml.Name{Space: ns, Local: local} }
 // Key renders a name as "{ns}local".
 func Key(n xml.Name) string { return "{" + n.Space + "}" + n.Local }
 
-// ParseKey reverses Key.
+// ParseKey reverses Key. A namespace may contain "}" but a local name
+// can't, so the last one ends the namespace.
 func ParseKey(k string) xml.Name {
 	if strings.HasPrefix(k, "{") {
-		if i := strings.IndexByte(k, '}'); i > 0 {
+		if i := strings.LastIndexByte(k, '}'); i > 0 {
 			return N(k[1:i], k[i+1:])
 		}
 	}
@@ -54,7 +55,9 @@ type Element struct {
 	Attrs    []xml.Attr
 	Children []*Element
 	Text     string // concatenated character data directly inside
-	// Inner is the raw inner XML (for storing dead properties verbatim).
+	// Inner is the inner XML (for storing dead properties), re-encoded so
+	// that every element declares its namespace: it can be written into
+	// any other document.
 	Inner string
 }
 
@@ -116,11 +119,12 @@ func ParseXML(r io.Reader) (*Element, error) {
 	var (
 		root   *Element
 		stack  []*Element
-		starts []int64
+		starts []int // offsets of the open elements' content in canon
+		tags   []string
 		texts  []*strings.Builder // text of the open elements; += would be quadratic
+		canon  strings.Builder    // the document, namespaces explicit (for Inner)
 	)
 	for {
-		off := d.InputOffset()
 		tok, err := d.Token()
 		if err == io.EOF {
 			break
@@ -144,16 +148,19 @@ func ParseXML(r io.Reader) (*Element, error) {
 				p.Children = append(p.Children, e)
 			}
 			stack = append(stack, e)
-			starts = append(starts, d.InputOffset())
+			tags = append(tags, writeStart(&canon, t))
+			starts = append(starts, canon.Len())
 			texts = append(texts, new(strings.Builder))
 		case xml.EndElement:
 			e := stack[len(stack)-1]
-			e.Inner = string(data[starts[len(starts)-1]:off])
+			e.Inner = canon.String()[starts[len(starts)-1]:]
 			e.Text = texts[len(texts)-1].String()
-			stack, starts, texts = stack[:len(stack)-1], starts[:len(starts)-1], texts[:len(texts)-1]
+			canon.WriteString("</" + tags[len(tags)-1] + ">")
+			stack, starts, tags, texts = stack[:len(stack)-1], starts[:len(starts)-1], tags[:len(tags)-1], texts[:len(texts)-1]
 		case xml.CharData:
 			if len(texts) > 0 {
 				texts[len(texts)-1].Write(t)
+				xml.EscapeText(&canon, t)
 			}
 		}
 	}
@@ -161,6 +168,34 @@ func ParseXML(r io.Reader) (*Element, error) {
 		return nil, fmt.Errorf("%w: no root element", ErrBadXML)
 	}
 	return root, nil
+}
+
+const nsXML = "http://www.w3.org/XML/1998/namespace"
+
+// writeStart writes a start tag that declares the namespaces of the
+// element and its attributes itself, and returns the tag name.
+func writeStart(b *strings.Builder, t xml.StartElement) string {
+	tag, decl := t.Name.Local, ""
+	if t.Name.Space != "" {
+		tag, decl = "n:"+t.Name.Local, ` xmlns:n="`+Esc(t.Name.Space)+`"`
+	}
+	b.WriteString("<" + tag + decl)
+	for i, a := range t.Attr {
+		switch {
+		case a.Name.Space == "xmlns" || a.Name.Space == "" && a.Name.Local == "xmlns":
+			continue // declarations: written as needed above
+		case a.Name.Space == "":
+			b.WriteString(" " + a.Name.Local)
+		case a.Name.Space == nsXML:
+			b.WriteString(" xml:" + a.Name.Local)
+		default:
+			p := "a" + strconv.Itoa(i)
+			b.WriteString(" xmlns:" + p + `="` + Esc(a.Name.Space) + `" ` + p + ":" + a.Name.Local)
+		}
+		b.WriteString(`="` + Esc(a.Value) + `"`)
+	}
+	b.WriteString(">")
+	return tag
 }
 
 // Esc escapes text for XML character data / attribute values.

@@ -1,11 +1,13 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/chriss-de/go-ccdav/internal/caldav"
 	"github.com/chriss-de/go-ccdav/internal/dav"
 	"github.com/chriss-de/go-ccdav/internal/store"
 )
@@ -64,7 +66,7 @@ func overlaySince(tok string) uint64 {
 
 // syncCollection implements the DAV:sync-collection REPORT (RFC 6578) on
 // calendars and address books, with sync-level 1.
-func (s *Server) syncCollection(w http.ResponseWriter, user string, res *resource, body *dav.Element) {
+func (s *Server) syncCollection(ctx context.Context, w http.ResponseWriter, user string, res *resource, body *dav.Element) {
 	if res.kind != kCollection || res.col == nil {
 		dav.WriteError(w, http.StatusForbidden, dav.N(dav.NSDAV, "supported-report"), "sync-collection is only supported on calendars and address books")
 		return
@@ -127,15 +129,16 @@ func (s *Server) syncCollection(w http.ResponseWriter, user string, res *resourc
 		}
 	}
 	props := propElements(body)
+	exp := caldav.NewExpandBudget(ctx)
 	for _, c := range changes {
 		// The current state wins over the logged operation.
 		if info, err := col.Stat(c.Name); err == nil {
-			ms.Responses = append(ms.Responses, s.responseFor(user, res.object(info, true), props, false))
+			ms.Responses = append(ms.Responses, s.responseFor(user, res.object(info, true), props, false, exp))
 		} else {
 			o := res.object(store.ObjectInfo{Name: c.Name}, false)
 			ms.Responses = append(ms.Responses, &dav.Response{Href: o.href(), Status: http.StatusNotFound})
 		}
 	}
 	ms.SyncToken = s.syncToken(res, cur)
-	ms.Write(w)
+	writeMultistatus(ctx, w, ms)
 }

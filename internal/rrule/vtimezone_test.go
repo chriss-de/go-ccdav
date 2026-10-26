@@ -1,6 +1,8 @@
 package rrule
 
 import (
+	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -62,5 +64,30 @@ func TestVTimezoneBerlinIsCompact(t *testing.T) {
 	}
 	if strings.Count(got, "BEGIN:DAYLIGHT")+strings.Count(got, "BEGIN:STANDARD") != 3 {
 		t.Errorf("want initial + 2 rules:\n%s", got)
+	}
+}
+
+// Many observances share one transition budget; without it each could
+// add vtzMaxTransitions and a small VTIMEZONE would need gigabytes.
+func TestVTimezoneTransitionBudget(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString("BEGIN:VCALENDAR\r\nBEGIN:VTIMEZONE\r\nTZID:Many\r\n")
+	for i := range 50 {
+		fmt.Fprintf(&sb, "BEGIN:STANDARD\r\nDTSTART:18000101T0000%02d\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0100\r\nRRULE:FREQ=DAILY\r\nEND:STANDARD\r\n", i)
+	}
+	sb.WriteString("END:VTIMEZONE\r\nEND:VCALENDAR\r\n")
+	cal, err := ical.ParseBytes([]byte(sb.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	before := ms.TotalAlloc
+	if _, err := LocationFromVTimezone(cal.Children[0]); err == nil {
+		t.Fatal("accepted a VTIMEZONE with 500000 transitions")
+	}
+	runtime.ReadMemStats(&ms)
+	if mb := (ms.TotalAlloc - before) >> 20; mb > 50 {
+		t.Fatalf("allocated %d MB", mb)
 	}
 }

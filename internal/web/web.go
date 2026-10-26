@@ -39,6 +39,7 @@ type UI struct {
 	cfg       *config.Store
 	st        *store.Store
 	appPass   *auth.AppPasswords
+	sessions  *auth.Sessions
 	limit     *auth.Limiter
 	pwCache   *auth.Cache
 	key       []byte
@@ -51,12 +52,12 @@ type UI struct {
 // New creates the UI. ap and lim must be the instances the DAV server
 // uses; defaults are the collections a new user gets (as on a first DAV
 // request).
-func New(cfg *config.Store, st *store.Store, ap *auth.AppPasswords, lim *auth.Limiter, key []byte,
+func New(cfg *config.Store, st *store.Store, ap *auth.AppPasswords, sess *auth.Sessions, lim *auth.Limiter, key []byte,
 	defaults map[store.Kind]map[string]store.Meta, log *slog.Logger) *UI {
 	c := cfg.Get()
 	return &UI{
 		prefix: c.UIPrefix, davPrefix: c.DAVPrefix,
-		cfg: cfg, st: st, appPass: ap, limit: lim, pwCache: auth.NewCache(15 * time.Minute), key: key,
+		cfg: cfg, st: st, appPass: ap, sessions: sess, limit: lim, pwCache: auth.NewCache(15 * time.Minute), key: key,
 		oidc: &oidcClient{http: &http.Client{Timeout: 15 * time.Second}},
 		tmpl: template.Must(template.New("").Funcs(template.FuncMap{
 			"inputColor": inputColor,
@@ -135,6 +136,13 @@ func (u *UI) renderLogin(w http.ResponseWriter, r *http.Request, errMsg string, 
 	data := map[string]any{"Prefix": u.prefix, "Error": errMsg, "OIDC": c.OIDC != nil}
 	if c.OIDC != nil {
 		data["Provider"] = c.OIDC.Name
+	} else {
+		v := randomString(16)
+		if ck, err := r.Cookie(loginCookie); err == nil && ck.Value != "" && len(ck.Value) <= 64 {
+			v = ck.Value
+		}
+		u.setCookie(w, r, loginCookie, v, loginTTL)
+		data["Token"] = u.loginToken(v)
 	}
 	u.render(w, status, "login.html", data)
 }
@@ -145,7 +153,18 @@ func (u *UI) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "password login is disabled; use single sign-on", http.StatusForbidden)
 		return
 	}
-	name, pw := strings.TrimSpace(r.PostFormValue("user")), r.PostFormValue("password")
+	// Anyone can post here: a small urlencoded body only (ParseForm leaves
+	// multipart alone, which would otherwise be spooled to disk).
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid form", http.StatusBadRequest)
+		return
+	}
+	if !u.loginFormOK(r) {
+		u.renderLogin(w, r, "The login page had expired; please sign in again.", http.StatusForbidden)
+		return
+	}
+	name, pw := strings.TrimSpace(r.PostForm.Get("user")), r.PostForm.Get("password")
 	ip := clientip.From(r, c.Trusted)
 	if ok, wait := u.limit.Allow(ip, name); !ok {
 		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())))
@@ -153,14 +172,28 @@ func (u *UI) passwordLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	usr, ok := c.Users[name]
-	if !ok || usr.Password == "" || !u.pwCache.Verify(name, usr.Password, pw) {
+	paused := ok && u.limit.AccountPaused(name)
+	if !ok || usr.Password == "" || paused {
+		auth.VerifyNone(pw) // as slow as a wrong password: don't tell who exists
+	}
+	if paused {
+		u.log.Warn("ui password logins paused after too many failures", "user", name, "ip", ip)
+	}
+	if !ok || usr.Password == "" || paused || !u.pwCache.Verify(name, usr.Password, pw) {
+		if ok && !paused {
+			u.limit.FailAccount(name)
+		}
 		u.limit.Fail(ip, name)
-		u.log.Warn("ui login failed", "user", name, "ip", ip)
+		u.log.Warn("ui login failed", "user", auth.ClipName(name), "ip", ip)
 		u.renderLogin(w, r, "Wrong user name or password.", http.StatusForbidden)
 		return
 	}
 	u.limit.Success(ip, name)
-	u.startSession(w, r, name)
+	if err := u.startSession(w, r, name); err != nil {
+		u.log.Error("ui login", "user", name, "err", err)
+		u.renderLogin(w, r, "Login failed.", http.StatusInternalServerError)
+		return
+	}
 	u.log.Info("login", "user", name, "via", "password")
 	http.Redirect(w, r, u.prefix, http.StatusSeeOther)
 }
@@ -351,6 +384,12 @@ func (u *UI) post(w http.ResponseWriter, r *http.Request, path string) {
 	)
 	switch path {
 	case "logout":
+		// Ends the user's sessions everywhere: a copy of the cookie must
+		// not outlive the logout.
+		if err := u.sessions.End(user); err != nil {
+			u.renderError(w, r, user, raw, err)
+			return
+		}
 		u.clearCookie(w, r, sessionCookie)
 		http.Redirect(w, r, u.prefix, http.StatusSeeOther)
 		return
@@ -400,7 +439,7 @@ func (u *UI) renderError(w http.ResponseWriter, r *http.Request, user, raw strin
 		d.Error = string(ue)
 	} else {
 		u.log.Error("ui action", "user", user, "err", err)
-		d.Error = "Something went wrong: " + err.Error()
+		d.Error = "Something went wrong; the server log has the details." // not err: paths and such
 	}
 	u.render(w, http.StatusBadRequest, "dashboard.html", d)
 }
@@ -422,7 +461,8 @@ func (u *UI) own(user, key string) (*store.Collection, error) {
 
 func (u *UI) byKey(key string) (*store.Collection, error) {
 	parts := strings.Split(key, "/")
-	if len(parts) != 3 {
+	if len(parts) != 3 || !config.ValidUserName(parts[0]) ||
+		store.Kind(parts[1]) != store.Calendars && store.Kind(parts[1]) != store.AddressBooks {
 		return nil, errUser("No such collection.")
 	}
 	return u.st.Collection(parts[0], store.Kind(parts[1]), parts[2])

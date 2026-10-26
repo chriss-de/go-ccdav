@@ -202,7 +202,7 @@ func (b *builder) prop(p *ical.Prop) {
 			ptr = p.Param("X-JSPTR")
 		}
 		var v any
-		if ptr != "" && json.Unmarshal([]byte(p.Text()), &v) == nil {
+		if ptr != "" && usableJSProp(ptr, p.Text()) && json.Unmarshal([]byte(p.Text()), &v) == nil {
 			b.jsprops = append(b.jsprops, jsprop{ptr, v})
 			segs := strings.SplitN(ptr, "/", 3)
 			b.at = loc{segs[0], ""}
@@ -470,6 +470,40 @@ func setPointer(card map[string]any, ptr string, v any) {
 
 func unescapePointer(s string) string {
 	return strings.NewReplacer("~1", "/", "~0", "~").Replace(s)
+}
+
+// Bounds for JSPROP lines: the converted object must stay encodable
+// (encoding/json refuses deep nesting) and cheap to build.
+const (
+	maxPointerSegs = 16
+	maxValueDepth  = 64
+)
+
+// jsonDepth returns the nesting depth of arrays and objects in a JSON text.
+func jsonDepth(b []byte) int {
+	depth, deepest, inStr, esc := 0, 0, false, false
+	for _, c := range b {
+		switch {
+		case esc:
+			esc = false
+		case inStr:
+			esc, inStr = c == '\\', c != '"'
+		case c == '"':
+			inStr = true
+		case c == '[' || c == '{':
+			depth++
+			deepest = max(deepest, depth)
+		case c == ']' || c == '}':
+			depth--
+		}
+	}
+	return deepest
+}
+
+// usableJSProp reports whether a JSPROP line's pointer and value are
+// within bounds.
+func usableJSProp(ptr, value string) bool {
+	return strings.Count(ptr, "/") < maxPointerSegs && jsonDepth([]byte(value)) <= maxValueDepth
 }
 
 // N components in order (RFC 6350 §6.2.2, RFC 9554 §2.2).

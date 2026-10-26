@@ -1,6 +1,9 @@
 package caldav
 
 import (
+	"context"
+	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +33,10 @@ func TestFreeBusy(t *testing.T) {
 	}
 	from := time.Date(2026, 1, 5, 9, 45, 0, 0, time.UTC) // clips the first period
 	to := time.Date(2026, 1, 9, 0, 0, 0, 0, time.UTC)
-	ps := FreeBusy(cals, from, to, nil)
+	ps, err := FreeBusy(context.Background(), cals, from, to, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var got []string
 	for _, p := range ps {
 		got = append(got, p.Type+" "+p.Start.Format("02T15:04")+"-"+p.End.Format("02T15:04"))
@@ -45,5 +51,27 @@ func TestFreeBusy(t *testing.T) {
 		if !strings.Contains(out, w) {
 			t.Errorf("missing %q in\n%s", w, out)
 		}
+	}
+}
+
+// Every instance became a period before merging: a minutely event with
+// gaps gave half a million periods for one year, and gigabytes for a few
+// such events.
+func TestFreeBusyBounded(t *testing.T) {
+	cal, err := ical.ParseBytes([]byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:m\r\nDTSTART:20260101T000000Z\r\n" +
+		"DURATION:PT30S\r\nRRULE:FREQ=MINUTELY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	before := ms.TotalAlloc
+	ps, err := FreeBusy(context.Background(), []*ical.Component{cal}, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC), nil)
+	runtime.ReadMemStats(&ms)
+	if !errors.Is(err, ErrFreeBusyTooLarge) || len(ps) > MaxFreeBusyPeriods {
+		t.Errorf("%d periods, err %v", len(ps), err)
+	}
+	if mb := (ms.TotalAlloc - before) >> 20; mb > 200 {
+		t.Errorf("allocated %d MB", mb)
 	}
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/xml"
+	"errors"
 	"net/http"
 	"slices"
 	"strconv"
@@ -112,7 +113,7 @@ func reports(names ...xml.Name) string {
 // propValue returns the raw XML value of one property and a status.
 // req is the requesting element (for calendar-data / address-data with
 // sub-elements).
-func (s *Server) propValue(user string, res *resource, name xml.Name, req *dav.Element) (string, int) {
+func (s *Server) propValue(user string, res *resource, name xml.Name, req *dav.Element, exp *caldav.ExpandBudget) (string, int) {
 	switch name {
 	case pCurrentUserPrincipal:
 		return hrefs(principalHref(res.base, user)), http.StatusOK
@@ -166,7 +167,7 @@ func (s *Server) propValue(user string, res *resource, name xml.Name, req *dav.E
 		}
 	case kObject:
 		if res.exists {
-			return s.objectProp(res, name, req)
+			return s.objectProp(res, name, req, exp)
 		}
 	}
 	return "", http.StatusNotFound
@@ -374,7 +375,7 @@ func (s *Server) collectionProp(res *resource, name xml.Name) (string, int) {
 	return "", http.StatusNotFound
 }
 
-func (s *Server) objectProp(res *resource, name xml.Name, req *dav.Element) (string, int) {
+func (s *Server) objectProp(res *resource, name xml.Name, req *dav.Element, exp *caldav.ExpandBudget) (string, int) {
 	switch name {
 	case pGetETag:
 		return dav.Esc(s.etagOf(res)), http.StatusOK
@@ -399,9 +400,12 @@ func (s *Server) objectProp(res *resource, name xml.Name, req *dav.Element) (str
 		}
 		var out string
 		if res.isCalendar() {
-			out, err = caldav.RenderData(data, req, caldav.FloatingZone(res.col.Meta().Timezone))
+			out, err = caldav.RenderData(data, req, caldav.FloatingZone(res.col.Meta().Timezone), exp)
 		} else {
 			out, err = carddav.RenderData(data, req)
+		}
+		if errors.Is(err, caldav.ErrExpandTooLarge) {
+			return "", http.StatusInsufficientStorage
 		}
 		if err != nil {
 			return "", http.StatusInternalServerError
@@ -413,8 +417,9 @@ func (s *Server) objectProp(res *resource, name xml.Name, req *dav.Element) (str
 
 // responseFor builds a DAV:response for the requested properties. With
 // reqProps == nil (allprop) the live properties are returned;
-// propNamesOnly returns empty elements (propname).
-func (s *Server) responseFor(user string, res *resource, reqProps []*dav.Element, propNamesOnly bool) *dav.Response {
+// propNamesOnly returns empty elements (propname). Expanded calendar data
+// draws on exp, which the caller shares across the responses of a request.
+func (s *Server) responseFor(user string, res *resource, reqProps []*dav.Element, propNamesOnly bool, exp *caldav.ExpandBudget) *dav.Response {
 	resp := &dav.Response{Href: res.href()}
 	if reqProps == nil {
 		for _, n := range s.allProps(res) {
@@ -422,7 +427,7 @@ func (s *Server) responseFor(user string, res *resource, reqProps []*dav.Element
 				resp.AddProp(http.StatusOK, dav.Prop{Name: n})
 				continue
 			}
-			v, st := s.propValue(user, res, n, nil)
+			v, st := s.propValue(user, res, n, nil, exp)
 			if st == http.StatusOK {
 				resp.AddProp(st, dav.Prop{Name: n, Value: v})
 			}
@@ -430,7 +435,7 @@ func (s *Server) responseFor(user string, res *resource, reqProps []*dav.Element
 		return resp
 	}
 	for _, el := range reqProps {
-		v, st := s.propValue(user, res, el.Name, el)
+		v, st := s.propValue(user, res, el.Name, el, exp)
 		if st != http.StatusOK {
 			v = ""
 		}

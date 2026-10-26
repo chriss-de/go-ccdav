@@ -1,6 +1,13 @@
 package auth
 
 import (
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -98,5 +105,86 @@ func TestLimiter(t *testing.T) {
 	time.Sleep(time.Millisecond)
 	if ok, _ := l2.Allow("ip", "u"); !ok {
 		t.Fatal("window did not expire")
+	}
+}
+
+// Asking costs no memory; failures keep at most a clipped name each.
+func TestLimiterMemory(t *testing.T) {
+	l := NewLimiter()
+	long := strings.Repeat("x", 1<<20)
+	for i := range 1000 {
+		if ok, _ := l.Allow("192.0.2.1", long+strconv.Itoa(i)); !ok {
+			t.Fatal("refused before any failure")
+		}
+	}
+	if len(l.fails) != 0 {
+		t.Fatalf("%d entries after only asking", len(l.fails))
+	}
+	l.Fail("192.0.2.1", long)
+	for k := range l.fails {
+		if len(k) > 100 {
+			t.Fatalf("key of %d bytes", len(k))
+		}
+	}
+	if ok, _ := l.Allow("192.0.2.1", long[:200]); !ok {
+		t.Fatal("refused after one failure")
+	}
+}
+
+// One IPv6 client has a whole /64: counting per address let it rotate
+// through addresses for unlimited guesses.
+func TestLimiterIPv6Prefix(t *testing.T) {
+	l := NewLimiter()
+	for i := range l.PerIP {
+		l.Fail(fmt.Sprintf("2001:db8:1:2::%x", i+1), "u"+strconv.Itoa(i))
+	}
+	if ok, _ := l.Allow("2001:db8:1:2:ffff::1", "x"); ok {
+		t.Fatal("same /64, new address: allowed")
+	}
+	if ok, _ := l.Allow("2001:db8:1:3::1", "x"); !ok {
+		t.Fatal("another /64 refused")
+	}
+	if ok, _ := l.Allow("192.0.2.7", "x"); !ok {
+		t.Fatal("IPv4 refused")
+	}
+}
+
+// Guesses at one user's config.yaml password from ever new addresses were
+// unlimited. After PerAccount failures, that password stops working for
+// the window; app passwords, which can't be guessed, go on working.
+func TestAccountWidePasswordLimit(t *testing.T) {
+	dir := t.TempDir()
+	ap := NewAppPasswords(dir)
+	app, _, err := ap.Create("alice", "phone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, _ := Hash("right")
+	l := NewLimiter()
+	b := NewBasic(func(u string) (string, bool) {
+		if u == "alice" {
+			return hash, true
+		}
+		return "", false
+	}, ap, l, slog.New(slog.NewTextHandler(io.Discard, nil)), "dav")
+	try := func(ip, pw string) int {
+		req := httptest.NewRequest("PROPFIND", "/dav/", nil)
+		req.SetBasicAuth("alice", pw)
+		w := httptest.NewRecorder()
+		b.Authenticate(w, req, ip)
+		return w.Code
+	}
+	if try("192.0.2.1", "right") != http.StatusOK {
+		t.Fatal("right password refused")
+	}
+	l.PerAccount = 20 // PBKDF2 per guess: keep the test short
+	for i := range l.PerAccount {
+		try(fmt.Sprintf("198.51.100.%d", i), "guess")
+	}
+	if st := try("203.0.113.9", "right"); st == http.StatusOK {
+		t.Fatal("config.yaml password still accepted after many failures from many addresses")
+	}
+	if st := try("203.0.113.9", app); st != http.StatusOK {
+		t.Fatalf("app password refused: %d", st)
 	}
 }

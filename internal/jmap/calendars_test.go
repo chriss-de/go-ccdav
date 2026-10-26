@@ -1,9 +1,11 @@
 package jmap
 
 import (
+	"fmt"
 	"os"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/chriss-de/go-ccdav/internal/store"
 )
@@ -199,10 +201,30 @@ func TestCalendarEventQuery(t *testing.T) {
 		{map[string]any{"filter": map[string]any{"attendee": "x"}}, ErrUnsupportedFilter},
 		{map[string]any{"sort": []any{map[string]any{"property": "title"}}}, ErrUnsupportedSort},
 		{map[string]any{"timeZone": "Mars/Olympus"}, ErrInvalidArguments},
+		{map[string]any{"timeZone": "Local"}, ErrInvalidArguments}, // the server's zone
 	} {
 		if r := e.eventQuery(tc.args); errType(r) != tc.err {
 			t.Errorf("%v: %+v, want %s", tc.args, r, tc.err)
 		}
+	}
+}
+
+// An event every second has millions of occurrences in the longest window:
+// expanding stops at the budget, and plain overlap checks copy nothing.
+func TestEventQueryExpansionBudget(t *testing.T) {
+	e, cal, _ := calendarsEnv(t)
+	cal.Put("secondly.ics", []byte("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:sec\r\nDTSTAMP:20260101T000000Z\r\n"+
+		"DTSTART:20260101T000000Z\r\nRRULE:FREQ=SECONDLY\r\nSUMMARY:tick\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"), store.Cond{})
+	log, _ := e.st.Account("alice", store.Calendars)
+	id, _ := log.ObjectID(cal, "secondly.ics")
+	r := e.eventQuery(map[string]any{"expandRecurrences": true,
+		"filter": map[string]any{"after": "2026-01-01T00:00:00", "before": "2026-12-31T00:00:00"}})
+	if errType(r) != ErrRequestTooLarge {
+		t.Fatalf("expanded a year of seconds: %.300v", r)
+	}
+	r = e.eventQuery(map[string]any{"filter": map[string]any{"after": "2026-01-05T00:00:00", "title": "tick"}})
+	if got, _ := r.Args["ids"].([]any); len(got) != 1 || got[0] != id {
+		t.Fatalf("open-ended window: %.300v", r)
 	}
 }
 
@@ -259,4 +281,30 @@ func ids2list(v any) []string {
 		out = append(out, x.(string))
 	}
 	return out
+}
+
+// Like DAV requests, a JMAP request that runs past its deadline while
+// expanding recurrences stops, and its calls fail instead of answering
+// with partial results.
+func TestExpansionDeadline(t *testing.T) {
+	defer func(d time.Duration) { workTimeout = d }(workTimeout)
+	workTimeout = 100 * time.Millisecond
+	e, cal, _ := calendarsEnv(t)
+	for i := range 5 {
+		cal.Put(fmt.Sprintf("s%d.ics", i), []byte(fmt.Sprintf("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:s%d\r\n", i)+
+			"DTSTAMP:20000101T000000Z\r\nDTSTART:20000101T000000Z\r\nRRULE:FREQ=SECONDLY\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"), store.Cond{})
+	}
+	start := time.Now()
+	r := e.api("alice",
+		call("CalendarEvent/query", map[string]any{"accountId": e.alice, "filter": map[string]any{"after": "2026-01-01T00:00:00", "before": "2026-01-02T00:00:00"}}, "q"),
+		call("Principal/getAvailability", map[string]any{"accountId": e.alice, "id": PrincipalID("alice"),
+			"utcStart": "2026-01-01T00:00:00Z", "utcEnd": "2026-01-02T00:00:00Z"}, "a"))
+	for _, x := range r {
+		if errType(x) != ErrServerUnavailable {
+			t.Errorf("%s: %.200v", x.ID, x)
+		}
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("took %v", d)
+	}
 }

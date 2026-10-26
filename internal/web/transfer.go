@@ -16,6 +16,9 @@ import (
 
 const maxImport = 50 << 20
 
+// maxObject is the largest object an import stores, as for a DAV PUT.
+const maxObject = 10 << 20
+
 var unsafeFileChars = regexp.MustCompile(`[^A-Za-z0-9._ -]+`)
 
 // export sends a collection as one .ics or .vcf file. Anyone with read
@@ -105,6 +108,11 @@ func (u *UI) importFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	added, updated, skipped, err := u.importInto(col, data)
+	var ue errUser
+	if errors.As(err, &ue) {
+		u.renderError(w, r, user, raw, err)
+		return
+	}
 	if err != nil {
 		u.renderError(w, r, user, raw, errUser("Could not read the file: "+err.Error()))
 		return
@@ -157,11 +165,19 @@ func (u *UI) importInto(col *store.Collection, data []byte) (added, updated, ski
 		}
 	}
 	for _, o := range objs {
+		if len(o.data) > maxObject {
+			skipped++
+			continue
+		}
 		name, exists := col.ByUID(o.uid)
 		if !exists {
 			name = objectName(col, o.uid, ext)
 		}
 		if _, _, err := col.Put(name, o.data, store.Cond{}); err != nil {
+			if errors.Is(err, store.ErrQuota) {
+				return added, updated, skipped, errUser(fmt.Sprintf(
+					"The storage quota is used up: imported %d new and %d updated, the rest was not.", added, updated))
+			}
 			skipped++
 			continue
 		}

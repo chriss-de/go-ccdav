@@ -315,7 +315,7 @@ func convertEvent(ev *ical.Component, cal *ical.Component) (map[string]any, *eve
 	// JSCalendar values iCalendar can't hold, written by Merge.
 	for _, p := range jsprops {
 		var v any
-		if json.Unmarshal([]byte(p.Text()), &v) == nil {
+		if usableJSProp(p.Param("JSPTR"), p.Text()) && json.Unmarshal([]byte(p.Text()), &v) == nil {
 			setPointer(e, p.Param("JSPTR"), v)
 		}
 	}
@@ -339,6 +339,40 @@ func setPointer(m map[string]any, ptr string, v any) {
 }
 
 func unescapePointer(s string) string { return strings.NewReplacer("~1", "/", "~0", "~").Replace(s) }
+
+// Bounds for JSPROP lines: the converted object must stay encodable
+// (encoding/json refuses deep nesting) and cheap to build.
+const (
+	maxPointerSegs = 16
+	maxValueDepth  = 64
+)
+
+// jsonDepth returns the nesting depth of arrays and objects in a JSON text.
+func jsonDepth(b []byte) int {
+	depth, deepest, inStr, esc := 0, 0, false, false
+	for _, c := range b {
+		switch {
+		case esc:
+			esc = false
+		case inStr:
+			esc, inStr = c == '\\', c != '"'
+		case c == '"':
+			inStr = true
+		case c == '[' || c == '{':
+			depth++
+			deepest = max(deepest, depth)
+		case c == ']' || c == '}':
+			depth--
+		}
+	}
+	return deepest
+}
+
+// usableJSProp reports whether a JSPROP line's pointer and value are
+// within bounds.
+func usableJSProp(ptr, value string) bool {
+	return strings.Count(ptr, "/") < maxPointerSegs && jsonDepth([]byte(value)) <= maxValueDepth
+}
 
 // timing sets start, timeZone, showWithoutTime, duration and endTimeZone.
 func timing(ev, cal *ical.Component, e map[string]any) error {
@@ -478,7 +512,7 @@ func localOf(dt rrule.DateTime, e map[string]any) string {
 	}
 	loc := time.UTC
 	if name, ok := e["timeZone"].(string); ok {
-		if l, err := time.LoadLocation(name); err == nil {
+		if l, err := rrule.LoadZone(name); err == nil {
 			loc = l
 		}
 	}

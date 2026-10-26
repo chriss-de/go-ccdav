@@ -41,6 +41,9 @@ func (c *Call) storeEvent(v *View, col *store.Collection, name string, cal *ical
 		id, _ := v.Log.ObjectID(col, dup.Existing)
 		return &setErr{SetError{Type: SetAlreadyExists, Description: "the UID is in use", ExistingID: id}}
 	}
+	if errors.Is(err, store.ErrQuota) {
+		return failSet(SetOverQuota, "the owner's storage quota is used up")
+	}
 	return err
 }
 
@@ -211,6 +214,9 @@ func (c *Call) updateEvent(v *View, id string, raw json.RawMessage) (map[string]
 		return res, err
 	}
 	if err := c.h.store.SetOverlay(c.User, v.Owner, base, peruser.Encode(*perUser)); err != nil {
+		if errors.Is(err, store.ErrTooLarge) {
+			return nil, failSet(SetTooLarge, "too much per-user data")
+		}
 		return nil, err
 	}
 	v.overlay = nil // reload: the new state must count this change
@@ -275,7 +281,7 @@ func (c *Call) writeEvent(v *View, base string, change func(e map[string]any) (m
 			return nil, failSet(SetForbidden, "the stored event cannot be converted")
 		}
 		if instanceOnly {
-			if _, isOverride := overrides(e.obj)[rid]; !isOverride && !c.h.occurs(v, ref, e.obj, rid) {
+			if _, isOverride := overrides(e.obj)[rid]; !isOverride && !c.h.occurs(c.ctx, v, ref, e.obj, rid) {
 				return nil, failSet(SetNotFound, "no such occurrence")
 			}
 		}
@@ -500,6 +506,9 @@ func (c *Call) copyEvent(from, to *View, cid string, raw json.RawMessage) (strin
 	return srcID, out, nil
 }
 
+// maxParseBytes bounds the blobs one CalendarEvent/parse reads.
+const maxParseBytes = maxSizeUpload
+
 type parseArgs struct {
 	AccountID  string    `json:"accountId"`
 	BlobIDs    []string  `json:"blobIds"`
@@ -513,17 +522,28 @@ func (c *Call) eventParse(raw json.RawMessage) (any, error) {
 	if err := DecodeArgs(raw, &args); err != nil {
 		return nil, err
 	}
-	a, ok := c.h.account(c.User, args.AccountID)
-	if !ok {
+	if _, ok := c.h.account(c.User, args.AccountID); !ok {
 		return nil, Errorf(ErrAccountNotFound, "no account %q", args.AccountID)
+	}
+	// Every blob is parsed in full: bound how many, and their total size.
+	ids := slices.Compact(slices.Sorted(slices.Values(args.BlobIDs)))
+	if len(ids) > MaxObjectsInGet {
+		return nil, Errorf(ErrRequestTooLarge, "more than %d blob ids", MaxObjectsInGet)
 	}
 	parsed := map[string]any{}
 	var notFound, notParsable []string
-	for _, id := range args.BlobIDs {
-		f, err := c.h.blobs.open(a.owner, id)
+	left := int64(maxParseBytes)
+	for _, id := range ids {
+		f, err := c.h.blobs.open(c.User, id)
 		if err != nil {
 			notFound = append(notFound, id)
 			continue
+		}
+		if fi, err := f.Stat(); err == nil {
+			if left -= fi.Size(); left < 0 {
+				f.Close()
+				return nil, Errorf(ErrRequestTooLarge, "the blobs are larger than %d bytes together", maxParseBytes)
+			}
 		}
 		cals, err := ical.ParseAll(f)
 		f.Close()

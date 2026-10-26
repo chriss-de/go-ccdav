@@ -320,3 +320,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.WriteHeader(status)
 	w.Write(b)
 }
+
+// workTimeout bounds how long one API request may spend expanding
+// recurrences; calls still running then fail with serverUnavailable.
+var workTimeout = 20 * time.Second

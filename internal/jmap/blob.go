@@ -19,14 +19,20 @@ import (
 // 8620 asks for at least an hour.
 const blobTTL = 24 * time.Hour
 
-// blobStore keeps uploads as users/<owner>/.jmap-blobs/<sha256>. The blob
-// id is "G" + the hex digest, so equal uploads share one file.
+// maxPendingUploads bounds the bytes of a user's unexpired uploads.
+var maxPendingUploads int64 = 200 << 20
+
+// blobStore keeps uploads as users/<uploader>/.jmap-blobs/<sha256>. The
+// blob id is "G" + the hex digest, so equal uploads share one file. Blobs
+// belong to whoever uploaded them, whatever account they named: others
+// with access to that account (a read-only sharee) can't fetch them by
+// id, which a hash of the content would make guessable.
 type blobStore struct {
 	root string
 }
 
-func (b blobStore) dir(owner string) string {
-	return filepath.Join(b.root, "users", owner, ".jmap-blobs")
+func (b blobStore) dir(user string) string {
+	return filepath.Join(b.root, "users", user, ".jmap-blobs")
 }
 
 func blobPath(dir, id string) (string, bool) {
@@ -40,14 +46,18 @@ func blobPath(dir, id string) (string, bool) {
 	return filepath.Join(dir, h), true
 }
 
-// put stores r and returns the blob id and size. Expired blobs of the
-// same owner are removed on the way.
-func (b blobStore) put(owner string, r io.Reader) (string, int64, error) {
-	dir := b.dir(owner)
+// errPendingFull: the upload would take the user's pending uploads past
+// maxPendingUploads.
+var errPendingFull = errors.New("jmap: too many pending uploads")
+
+// put stores r for user and returns the blob id and size. Expired blobs
+// of the same user are removed on the way.
+func (b blobStore) put(user string, r io.Reader) (string, int64, error) {
+	dir := b.dir(user)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", 0, err
 	}
-	b.expire(dir)
+	room := maxPendingUploads - b.expire(dir)
 	f, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
 		return "", 0, err
@@ -55,12 +65,15 @@ func (b blobStore) put(owner string, r io.Reader) (string, int64, error) {
 	tmp := f.Name()
 	defer os.Remove(tmp)
 	sum := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, sum), r)
+	n, err := io.Copy(io.MultiWriter(f, sum), io.LimitReader(r, max(room, 0)+1))
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err != nil {
 		return "", 0, err
+	}
+	if n > room {
+		return "", 0, errPendingFull
 	}
 	id := "G" + hex.EncodeToString(sum.Sum(nil))
 	p, _ := blobPath(dir, id)
@@ -72,8 +85,9 @@ func (b blobStore) put(owner string, r io.Reader) (string, int64, error) {
 	return id, n, nil
 }
 
-func (b blobStore) open(owner, id string) (*os.File, error) {
-	p, ok := blobPath(b.dir(owner), id)
+// open opens a blob user uploaded.
+func (b blobStore) open(user, id string) (*os.File, error) {
+	p, ok := blobPath(b.dir(user), id)
 	if !ok {
 		return nil, fs.ErrNotExist
 	}
@@ -87,16 +101,23 @@ func (b blobStore) open(owner, id string) (*os.File, error) {
 	return os.Open(p)
 }
 
-func (b blobStore) expire(dir string) {
+// expire removes expired blobs and returns the bytes of the others.
+func (b blobStore) expire(dir string) (kept int64) {
 	ents, err := os.ReadDir(dir)
 	if err != nil {
-		return
+		return 0
 	}
 	for _, e := range ents {
-		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > blobTTL {
+		fi, err := e.Info()
+		switch {
+		case err != nil:
+		case time.Since(fi.ModTime()) > blobTTL:
 			os.Remove(filepath.Join(dir, e.Name()))
+		default:
+			kept += fi.Size()
 		}
 	}
+	return kept
 }
 
 type uploadResponse struct {
@@ -124,11 +145,16 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, user, accountID
 		return
 	}
 	defer release()
-	id, size, err := h.blobs.put(a.owner, http.MaxBytesReader(w, r.Body, maxSizeUpload))
+	id, size, err := h.blobs.put(user, http.MaxBytesReader(w, r.Body, maxSizeUpload))
 	if err != nil {
 		var mbe *http.MaxBytesError
 		if errors.As(err, &mbe) {
 			writeProblem(w, problem{Type: probLimit, Limit: "maxSizeUpload", Detail: "upload too large", Status: http.StatusRequestEntityTooLarge})
+			return
+		}
+		if errors.Is(err, errPendingFull) {
+			writeProblem(w, problem{Type: probLimit, Limit: "maxSizeUpload", Status: http.StatusRequestEntityTooLarge,
+				Detail: "too many uploads in the last day; try again later"})
 			return
 		}
 		h.log.Error("jmap upload", "user", user, "err", err)
@@ -146,12 +172,11 @@ func (h *Handler) upload(w http.ResponseWriter, r *http.Request, user, accountID
 // content type; the response is an attachment in a CSP sandbox, so even
 // text/html can't run in the server's origin.
 func (h *Handler) download(w http.ResponseWriter, r *http.Request, user, accountID, blobID, name string) {
-	a, ok := h.account(user, accountID)
-	if !ok {
+	if _, ok := h.account(user, accountID); !ok {
 		http.NotFound(w, r)
 		return
 	}
-	f, err := h.blobs.open(a.owner, blobID)
+	f, err := h.blobs.open(user, blobID)
 	if errors.Is(err, fs.ErrNotExist) {
 		http.NotFound(w, r)
 		return

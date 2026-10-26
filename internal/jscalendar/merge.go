@@ -591,7 +591,7 @@ func (m *merger) timing(e map[string]any) []*ical.Prop {
 		end := t.AddDate(0, 0, d.Days).Add(d.Clock)
 		return append(lines, dateTimeProp("DTEND", end, "", false))
 	default:
-		loc, err := time.LoadLocation(tz)
+		loc, err := rrule.LoadZone(tz)
 		if err != nil {
 			return lines
 		}
@@ -599,7 +599,7 @@ func (m *merger) timing(e map[string]any) []*ical.Prop {
 		end := local.AddDate(0, 0, d.Days).Add(d.Clock)
 		endTZ := tz
 		if etz := str(e["endTimeZone"]); etz != "" {
-			if eloc, err := time.LoadLocation(etz); err == nil {
+			if eloc, err := rrule.LoadZone(etz); err == nil {
 				end, endTZ = end.In(eloc), etz
 			}
 		}
@@ -657,7 +657,7 @@ func rruleValue(r map[string]any, e map[string]any) string {
 			case e["showWithoutTime"] == true:
 				parts = append(parts, "UNTIL="+t.Format("20060102"))
 			case tz != "":
-				if loc, err := time.LoadLocation(tz); err == nil {
+				if loc, err := rrule.LoadZone(tz); err == nil {
 					local := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), 0, loc)
 					parts = append(parts, "UNTIL="+local.UTC().Format("20060102T150405Z"))
 				}

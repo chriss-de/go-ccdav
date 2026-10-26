@@ -2,6 +2,7 @@ package caldav
 
 import (
 	"bytes"
+	"errors"
 	"slices"
 
 	"github.com/chriss-de/go-ccdav/internal/ical"
@@ -12,6 +13,18 @@ type Object struct {
 	UID  string
 	Data []byte
 }
+
+// ErrSplitTooLarge is returned by Split when the objects would be much
+// larger than the file: every object gets a copy of the VTIMEZONEs it
+// uses, so a big VTIMEZONE shared by many events multiplies.
+var ErrSplitTooLarge = errors.New("caldav: the calendar objects would be too large")
+
+// splitGrowth bounds Split's output: at most this many times the input,
+// plus splitSlack for small files.
+const (
+	splitGrowth = 4
+	splitSlack  = 1 << 20
+)
 
 // Split turns an iCalendar file (an export, possibly with several
 // VCALENDARs) into calendar object resources: one per UID, holding the
@@ -65,6 +78,7 @@ func Split(data []byte) (objs []Object, skipped int, err error) {
 	if !slices.ContainsFunc(head, func(p *ical.Prop) bool { return p.Name == "PRODID" }) {
 		head = append(head, &ical.Prop{Name: "PRODID", Value: "-//ccdav//import//EN"})
 	}
+	budget := splitGrowth*len(data) + splitSlack
 	for _, uid := range order {
 		out := &ical.Component{Name: "VCALENDAR", Props: head}
 		seen := map[string]bool{}
@@ -77,7 +91,11 @@ func Split(data []byte) (objs []Object, skipped int, err error) {
 			}
 		}
 		out.Children = append(out.Children, groups[uid]...)
-		objs = append(objs, Object{UID: uid, Data: out.Bytes()})
+		obj := Object{UID: uid, Data: out.Bytes()}
+		if budget -= len(obj.Data); budget < 0 {
+			return nil, 0, ErrSplitTooLarge
+		}
+		objs = append(objs, obj)
 	}
 	return objs, skipped, nil
 }

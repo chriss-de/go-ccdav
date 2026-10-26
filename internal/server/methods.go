@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -59,7 +60,8 @@ func (s *Server) propfind(w http.ResponseWriter, r *http.Request, res *resource)
 	}
 	user := userOf(r)
 	ms := &dav.Multistatus{}
-	ms.Responses = append(ms.Responses, s.responseFor(user, res, reqProps, names))
+	exp := caldav.NewExpandBudget(r.Context())
+	ms.Responses = append(ms.Responses, s.responseFor(user, res, reqProps, names, exp))
 	if depth == 1 && res.isCollection() {
 		kids, err := s.children(res)
 		if err != nil {
@@ -67,10 +69,10 @@ func (s *Server) propfind(w http.ResponseWriter, r *http.Request, res *resource)
 			return
 		}
 		for _, k := range kids {
-			ms.Responses = append(ms.Responses, s.responseFor(user, k, reqProps, names))
+			ms.Responses = append(ms.Responses, s.responseFor(user, k, reqProps, names, exp))
 		}
 	}
-	ms.Write(w)
+	writeMultistatus(r.Context(), w, ms)
 }
 
 func userOf(r *http.Request) string {
@@ -254,6 +256,22 @@ func (s *Server) mkcollection(w http.ResponseWriter, r *http.Request, res *resou
 	}
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(http.StatusCreated)
+}
+
+// writeMultistatus sends ms, unless the request ran out of time: then
+// expansions may have stopped early and ms may be incomplete.
+func writeMultistatus(ctx context.Context, w http.ResponseWriter, ms *dav.Multistatus) {
+	if ctx.Err() != nil {
+		tooSlow(w)
+		return
+	}
+	ms.Write(w)
+}
+
+// tooSlow answers a request that ran past workTimeout.
+func tooSlow(w http.ResponseWriter) {
+	w.Header().Set("Retry-After", "60")
+	http.Error(w, "the request took too long", http.StatusServiceUnavailable)
 }
 
 // needPrivileges answers a write on a read-only share.
@@ -491,15 +509,15 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request, res *resource) {
 	user := userOf(r)
 	switch body.Name {
 	case dav.N(dav.NSCalDAV, "calendar-multiget"), dav.N(dav.NSCardDAV, "addressbook-multiget"):
-		s.multiget(w, user, res, body)
+		s.multiget(r.Context(), w, user, res, body)
 	case dav.N(dav.NSCalDAV, "calendar-query"):
 		s.calendarQuery(w, r, user, res, body)
 	case dav.N(dav.NSCardDAV, "addressbook-query"):
 		s.addressbookQuery(w, r, user, res, body)
 	case dav.N(dav.NSCalDAV, "free-busy-query"):
-		s.freeBusyQuery(w, res, body)
+		s.freeBusyQuery(r.Context(), w, res, body)
 	case dav.N(dav.NSDAV, "sync-collection"):
-		s.syncCollection(w, user, res, body)
+		s.syncCollection(r.Context(), w, user, res, body)
 	case dav.N(dav.NSDAV, "principal-search-property-set"):
 		w.Header().Set("Content-Type", `application/xml; charset="utf-8"`)
 		io.WriteString(w, `<?xml version="1.0" encoding="utf-8"?>`+"\n"+`<d:principal-search-property-set xmlns:d="DAV:"/>`+"\n")
@@ -517,9 +535,10 @@ func propElements(body *dav.Element) []*dav.Element {
 	return nil // allprop
 }
 
-func (s *Server) multiget(w http.ResponseWriter, user string, res *resource, body *dav.Element) {
+func (s *Server) multiget(ctx context.Context, w http.ResponseWriter, user string, res *resource, body *dav.Element) {
 	props := propElements(body)
 	ms := &dav.Multistatus{}
+	exp := caldav.NewExpandBudget(ctx)
 	for _, h := range body.ChildrenNamed(dav.NSDAV, "href") {
 		raw := strings.TrimSpace(h.Text)
 		p := raw
@@ -535,11 +554,11 @@ func (s *Server) multiget(w http.ResponseWriter, user string, res *resource, bod
 			ms.Responses = append(ms.Responses, &dav.Response{Href: p, Status: st})
 			continue
 		}
-		resp := s.responseFor(user, target, props, false)
+		resp := s.responseFor(user, target, props, false, exp)
 		resp.Href = p // echo what the client asked for
 		ms.Responses = append(ms.Responses, resp)
 	}
-	ms.Write(w)
+	writeMultistatus(ctx, w, ms)
 }
 
 // queryTargets returns the objects a query REPORT runs over: the members
@@ -588,9 +607,10 @@ func (s *Server) calendarQuery(w http.ResponseWriter, r *http.Request, user stri
 			floating = loc
 		}
 	}
-	q := &caldav.Query{Filter: filter, Floating: floating}
+	q := &caldav.Query{Filter: filter, Floating: floating, Ctx: r.Context()}
 	props := propElements(body)
 	ms := &dav.Multistatus{}
+	exp := caldav.NewExpandBudget(r.Context())
 	for _, o := range objs {
 		data, _, err := o.col.Get(o.name)
 		if err != nil {
@@ -607,10 +627,10 @@ func (s *Server) calendarQuery(w http.ResponseWriter, r *http.Request, user stri
 			return
 		}
 		if ok {
-			ms.Responses = append(ms.Responses, s.responseFor(user, o, props, false))
+			ms.Responses = append(ms.Responses, s.responseFor(user, o, props, false, exp))
 		}
 	}
-	ms.Write(w)
+	writeMultistatus(r.Context(), w, ms)
 }
 
 // addressbookQuery implements CARDDAV:addressbook-query (RFC 6352 §8.6).
@@ -631,6 +651,7 @@ func (s *Server) addressbookQuery(w http.ResponseWriter, r *http.Request, user s
 	}
 	props := propElements(body)
 	ms := &dav.Multistatus{}
+	exp := caldav.NewExpandBudget(r.Context())
 	matched := 0
 	for _, o := range objs {
 		data, _, err := o.col.Get(o.name)
@@ -659,14 +680,14 @@ func (s *Server) addressbookQuery(w http.ResponseWriter, r *http.Request, user s
 			break
 		}
 		matched++
-		ms.Responses = append(ms.Responses, s.responseFor(user, o, props, false))
+		ms.Responses = append(ms.Responses, s.responseFor(user, o, props, false, exp))
 	}
-	ms.Write(w)
+	writeMultistatus(r.Context(), w, ms)
 }
 
 // freeBusyQuery implements CALDAV:free-busy-query (RFC 4791 §7.10) on a
 // calendar: a VFREEBUSY of the busy time within the requested range.
-func (s *Server) freeBusyQuery(w http.ResponseWriter, res *resource, body *dav.Element) {
+func (s *Server) freeBusyQuery(ctx context.Context, w http.ResponseWriter, res *resource, body *dav.Element) {
 	if res.kind != kCollection || res.col == nil || !res.isCalendar() {
 		dav.WriteError(w, http.StatusForbidden, dav.N(dav.NSDAV, "supported-report"), "free-busy-query is only supported on calendars")
 		return
@@ -692,7 +713,16 @@ func (s *Server) freeBusyQuery(w http.ResponseWriter, res *resource, body *dav.E
 		}
 	}
 	floating := caldav.FloatingZone(res.col.Meta().Timezone)
-	out := caldav.FreeBusyCalendar(caldav.FreeBusy(cals, from, to, floating), from, to, time.Now()).Bytes()
+	ps, err := caldav.FreeBusy(ctx, cals, from, to, floating)
+	if ctx.Err() != nil {
+		tooSlow(w)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInsufficientStorage)
+		return
+	}
+	out := caldav.FreeBusyCalendar(ps, from, to, time.Now()).Bytes()
 	w.Header().Set("Content-Type", "text/calendar; charset=utf-8")
 	w.Header().Set("Content-Length", strconv.Itoa(len(out)))
 	w.Write(out)

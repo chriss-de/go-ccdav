@@ -9,7 +9,7 @@ A small self-hosted CalDAV and CardDAV server in Go. Calendars and contacts are 
 - Sharing with users or groups, read-only or read-write. Shared collections appear in the other user's home as `<owner>~<name>`.
 - A generated, read-only `Directory` address book in every user's home, listing all users and groups.
 - Web UI login with OIDC or password. Devices use named, revocable app passwords.
-- Login rate limiting per client IP and user. Plain HTTP; TLS is left to a reverse proxy.
+- Login rate limiting per client IP and user, and per account for `config.yaml` passwords. Plain HTTP; TLS is left to a reverse proxy. The web UI's cookies are `Secure`, so it needs HTTPS except at `http://localhost`.
 
 Not implemented yet: scheduling/iMIP and RSVP links. The design is in [`ccdav-design-export.md`](ccdav-design-export.md).
 
@@ -72,9 +72,10 @@ Unknown keys are rejected. `SIGHUP` reloads the file. See [`config.example.yaml`
 | `users.<name>.email`, `.name` | | used for OIDC matching and the directory |
 | `groups.<name>` | | list of user names; groups are share targets and principals |
 | `directory` | `true` | `false` removes the generated `Directory` address book |
+| `quota` | none | bytes of calendar and contact data each user may own, e.g. `2GB`; writes into a shared collection count for its owner. JMAP uploads are capped at 200 MB per user and day |
 | `oidc.issuer`, `.client_id` | | required for OIDC login; redirect URI is `<base_url><ui_prefix>callback` |
 | `oidc.client_secret` | | |
-| `oidc.username_claim` | `preferred_username` | must equal a user name or email |
+| `oidc.username_claim` | `preferred_username` | must equal a user name; `email` matches users' emails instead, if `email_verified` is true |
 | `oidc.scopes` | `openid profile email` | |
 | `oidc.name` | `single sign-on` | login button label |
 | `smtp.*`, `rsvp_secret` | | reserved for invitations, not used yet |
@@ -133,7 +134,7 @@ make image-release REGISTRY=registry.example.com/me TAG=1.2.0   # pushes :1.2.0 
 
 The image is based on distroless `static:nonroot` and runs as UID 65532, which matters when you map UIDs. The config is expected at `/data/config.yaml`. There is no built-in healthcheck; use `ccdav healthcheck` as an exec probe.
 
-CI builds `linux/amd64` and `linux/arm64` images and publishes them to Docker Hub: `edge` from `master`, and semver tags from `v*`.
+CI checks and builds every push to `main` and every pull request, for `linux/amd64` and `linux/arm64`. Only version tags (`v1.2.3`) publish images to Docker Hub, as `1.2.3`, `1.2`, `1` and `latest`.
 
 ### Reverse proxy
 

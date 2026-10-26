@@ -33,28 +33,32 @@ type View struct {
 // View resolves an accountId argument. accountNotFound if the user can't
 // see the account.
 func (c *Call) View(accountID string, kind store.Kind) (*View, error) {
-	a, ok := c.h.account(c.User, accountID)
+	return c.h.view(c.User, accountID, kind)
+}
+
+func (h *Handler) view(user, accountID string, kind store.Kind) (*View, error) {
+	a, ok := h.account(user, accountID)
 	if !ok {
 		return nil, Errorf(ErrAccountNotFound, "no account %q", accountID)
 	}
 	if a.personal {
 		// As in DAV, a home starts with its default collections.
-		if err := c.h.store.EnsureHome(a.owner, kind, c.h.defaults[kind]); err != nil {
+		if err := h.store.EnsureHome(a.owner, kind, h.defaults[kind]); err != nil {
 			return nil, err
 		}
 	}
-	log, err := c.h.store.Account(a.owner, kind)
+	log, err := h.store.Account(a.owner, kind)
 	if err != nil {
 		return nil, err
 	}
-	v := &View{st: c.h.store, AccountID: accountID, User: c.User, Owner: a.owner, Own: a.personal, Kind: kind, Log: log,
+	v := &View{st: h.store, AccountID: accountID, User: user, Owner: a.owner, Own: a.personal, Kind: kind, Log: log,
 		Colls: map[string]*store.Collection{}, Access: map[string]string{}}
-	groups := c.h.cfg.Get().GroupsOf(c.User)
-	for _, col := range c.h.store.All() {
+	groups := h.cfg.Get().GroupsOf(user)
+	for _, col := range h.store.All() {
 		if col.Owner != a.owner || col.Kind != kind {
 			continue
 		}
-		if acc := col.AccessOf(c.User, groups); acc != "" {
+		if acc := col.AccessOf(user, groups); acc != "" {
 			id := col.ID()
 			v.Colls[id], v.Access[id] = col, acc
 		}
@@ -84,7 +88,15 @@ func (v *View) tag(l store.Level) string {
 
 // State is the JMAP state string of a level: "<home>-<token>-<tag>".
 func (v *View) State(l store.Level) string {
-	home, tok := v.Log.State(l)
+	if v.Own {
+		home, tok := v.Log.State(l)
+		return v.state(l, home, tok)
+	}
+	visible := map[string]bool{}
+	for id := range v.Colls {
+		visible[id] = true
+	}
+	home, tok := v.Log.StateIn(l, visible)
 	return v.state(l, home, tok)
 }
 
@@ -156,7 +168,11 @@ func (c *Call) Changes(raw json.RawMessage, kind store.Kind, l store.Level) (*Ch
 		return nil, err
 	}
 	home, _ := v.Log.State(l)
-	resp := &ChangesResponse{AccountID: args.AccountID, OldState: args.SinceState, NewState: v.state(l, home, next),
+	newState := v.state(l, home, next)
+	if !more {
+		newState = v.State(l) // in a shared account, only the visible part counts
+	}
+	resp := &ChangesResponse{AccountID: args.AccountID, OldState: args.SinceState, NewState: newState,
 		HasMoreChanges: more, Created: []string{}, Updated: []string{}, Destroyed: []string{}}
 	for _, ch := range changes {
 		if !v.Own {

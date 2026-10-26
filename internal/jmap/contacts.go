@@ -118,6 +118,11 @@ func (c *Call) addressBook(v *View, col *store.Collection) map[string]any {
 	acc := v.Access[id]
 	writable := !m.ReadOnly && (acc == store.AccessOwner || acc == store.AccessWrite)
 	owner := !m.ReadOnly && acc == store.AccessOwner
+	// Only who may share sees the shares (RFC 9670): the owner.
+	var sharing any
+	if owner {
+		sharing = shareWith(col)
+	}
 	return map[string]any{
 		"id":           id,
 		"name":         name,
@@ -125,7 +130,7 @@ func (c *Call) addressBook(v *View, col *store.Collection) map[string]any {
 		"sortOrder":    sortOrder,
 		"isDefault":    col.Name == c.h.defaultName(store.AddressBooks),
 		"isSubscribed": subscribed,
-		"shareWith":    nil, // needs Principal objects
+		"shareWith":    sharing,
 		"myRights": map[string]any{
 			"mayRead": true, "mayWrite": writable, "mayShare": owner, "mayDelete": owner,
 		},

@@ -109,6 +109,7 @@ func newEnv(t testing.TB) *env {
 	})
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
+	t.Cleanup(h.Close) // runs first: ends push streams, so srv.Close doesn't wait
 	return &env{t: t, srv: srv, h: h, st: st, cfg: cs, dir: dir, alice: AccountID("alice"), bob: AccountID("bob")}
 }
 
@@ -142,7 +143,7 @@ func decode[T any](t testing.TB, resp *http.Response) T {
 // responses as [name, args, id] with decoded args.
 func (e *env) api(user string, calls ...any) []apiResp {
 	e.t.Helper()
-	body, _ := json.Marshal(map[string]any{"using": []string{CapCore, capTest, CapContacts}, "methodCalls": calls})
+	body, _ := json.Marshal(map[string]any{"using": []string{CapCore, capTest, CapContacts, CapPrincipals}, "methodCalls": calls})
 	resp := e.do(user, "POST", "/jmap/api", "application/json", body)
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)

@@ -117,6 +117,7 @@ type Account struct {
 	cur    map[string]acctEntry // level+id -> newest entry, live or deleted
 	byLoc  map[string]string    // coll+"/"+name -> object id, live only
 	batch  *os.File             // open during Reconcile: no fsync per line
+	notify func()               // after every change; must not block
 }
 
 func loadAccount(path, owner string, kind Kind) (*Account, error) {
@@ -210,6 +211,7 @@ func (a *Account) append(e acctEntry) error {
 			return err
 		}
 		a.apply(e)
+		a.changed()
 		return nil
 	}
 	f, err := a.open()
@@ -227,7 +229,14 @@ func (a *Account) append(e acctEntry) error {
 		return err
 	}
 	a.apply(e)
+	a.changed()
 	return a.maybeCompact()
+}
+
+func (a *Account) changed() {
+	if a.notify != nil {
+		a.notify()
+	}
 }
 
 // maybeCompact compacts once the log has grown well past what it
@@ -469,6 +478,27 @@ func (a *Account) State(l Level) (home string, token uint64) {
 	return a.home, max(a.latest[l], a.floor)
 }
 
+// StateIn is State limited to some collections (by id): the newest
+// token of a level among entries that concern them. Someone a few
+// collections are shared with gets a state that doesn't move when the
+// owner changes others. It never goes back: compaction drops only
+// entries at or below the floor.
+func (a *Account) StateIn(l Level, colls map[string]bool) (home string, token uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	token = a.floor
+	for _, e := range a.log {
+		coll := e.Coll
+		if l == LevelCollections {
+			coll = e.ID
+		}
+		if e.Level == l && colls[coll] {
+			token = max(token, e.Token)
+		}
+	}
+	return a.home, token
+}
+
 // AccountChange is the newest change of one id since some token.
 type AccountChange struct {
 	ID      string
@@ -567,6 +597,18 @@ func (a *Account) ObjectID(c *Collection, name string) (string, bool) {
 // is loaded, and only in the server process.
 func (s *Store) TrackAccounts() { s.track = true }
 
+// OnChange sets a function called with owner and kind whenever an
+// account log changes, and when a user's settings for a collection
+// shared with them change (their view of the owner's account). It runs
+// with locks held and must not block. Set it before serving.
+func (s *Store) OnChange(fn func(owner string, kind Kind)) { s.onChange = fn }
+
+func (s *Store) changed(owner string, kind Kind) {
+	if s.onChange != nil {
+		s.onChange(owner, kind)
+	}
+}
+
 // Account returns the account log of owner and kind.
 func (s *Store) Account(owner string, kind Kind) (*Account, error) {
 	s.mu.Lock()
@@ -587,6 +629,7 @@ func (s *Store) account(owner string, kind Kind) (*Account, error) {
 	if err != nil {
 		return nil, err
 	}
+	a.notify = func() { s.changed(owner, kind) }
 	if s.accts == nil {
 		s.accts = map[string]*Account{}
 	}

@@ -244,5 +244,9 @@ func (s *Store) UpdateSharePrefs(user, key string, fn func(*SharePrefs)) error {
 		return err
 	}
 	s.prefs.users[user] = next
+	if owner, kind, ok := strings.Cut(key, "/"); ok {
+		kind, _, _ = strings.Cut(kind, "/")
+		s.changed(owner, Kind(kind))
+	}
 	return nil
 }

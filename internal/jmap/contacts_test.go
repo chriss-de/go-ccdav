@@ -67,7 +67,7 @@ func TestAddressBookGet(t *testing.T) {
 	}
 	ab := list[0].(map[string]any)
 	rights := ab["myRights"].(map[string]any)
-	if ab["name"] != "Contacts" || ab["isDefault"] != true || ab["isSubscribed"] != true || ab["shareWith"] != nil ||
+	if ab["name"] != "Contacts" || ab["isDefault"] != true || ab["isSubscribed"] != true || len(ab["shareWith"].(map[string]any)) != 0 ||
 		rights["mayWrite"] != true || rights["mayDelete"] != true {
 		t.Fatalf("%+v", ab)
 	}

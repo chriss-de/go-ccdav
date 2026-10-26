@@ -574,17 +574,15 @@ func (c *Call) addressBookSet(raw json.RawMessage) (any, error) {
 	return resp, nil
 }
 
-// bookProps are the AddressBook properties a client can set.
-var bookProps = []string{"name", "description", "sortOrder", "isSubscribed", "shareWith"}
-
 // bookChange reads the client-settable properties of an AddressBook.
 type bookChange struct {
 	name, description *string
 	sortOrder         *int
 	isSubscribed      *bool
+	shares            *[]store.Share
 }
 
-func parseBookProps(obj, current map[string]any) (bookChange, error) {
+func (c *Call) parseBookProps(owner string, obj, current map[string]any) (bookChange, error) {
 	var ch bookChange
 	for k, val := range obj {
 		if current != nil && jsonEqual(val, current[k]) {
@@ -618,9 +616,14 @@ func parseBookProps(obj, current map[string]any) (bookChange, error) {
 			}
 			ch.isSubscribed = &b
 		case "shareWith":
-			if val != nil {
-				return ch, failSet(SetForbidden, "sharing via shareWith is not supported yet; use the web UI", k)
+			if current != nil && current[k] == nil {
+				return ch, failSet(SetForbidden, "only the owner can share", k)
 			}
+			shares, err := parseShareWith(c.h.cfg.Get(), owner, val)
+			if err != nil {
+				return ch, err
+			}
+			ch.shares = &shares
 		default:
 			return ch, failSet(SetInvalidProperties, k+" cannot be set", k)
 		}
@@ -636,7 +639,7 @@ func (c *Call) createBook(v *View, cid string, raw json.RawMessage) (map[string]
 	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
 		return nil, failSet(SetInvalidProperties, "not an object")
 	}
-	ch, err := parseBookProps(obj, nil)
+	ch, err := c.parseBookProps(v.Owner, obj, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -656,6 +659,11 @@ func (c *Call) createBook(v *View, cid string, raw json.RawMessage) (map[string]
 	col, err := c.h.store.CreateCollection(v.Owner, store.AddressBooks, newUUID(), m)
 	if err != nil {
 		return nil, err
+	}
+	if ch.shares != nil {
+		if err := col.SetShares(*ch.shares); err != nil {
+			return nil, err
+		}
 	}
 	id := col.ID()
 	c.Created(cid, id)
@@ -679,7 +687,7 @@ func (c *Call) updateBook(v *View, id string, raw json.RawMessage) error {
 	if err := ApplyPatch(next, patch); err != nil {
 		return failSet(SetInvalidPatch, err.Error())
 	}
-	ch, err := parseBookProps(next, copyJSON(cur))
+	ch, err := c.parseBookProps(v.Owner, next, copyJSON(cur))
 	if err != nil {
 		return err
 	}
@@ -699,8 +707,13 @@ func (c *Call) updateBook(v *View, id string, raw json.RawMessage) error {
 			}
 		})
 	}
-	if col.ReadOnly() && (ch.name != nil || ch.description != nil) {
+	if col.ReadOnly() && (ch.name != nil || ch.description != nil || ch.shares != nil) {
 		return failSet(SetForbidden, "generated address book")
+	}
+	if ch.shares != nil {
+		if err := col.SetShares(*ch.shares); err != nil {
+			return err
+		}
 	}
 	return col.UpdateMeta(func(m *store.Meta) {
 		if ch.name != nil {

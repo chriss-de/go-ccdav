@@ -10,7 +10,7 @@
 //	<prefix>api                                        API requests (POST)
 //	<prefix>upload/<accountId>/                        blob upload (POST)
 //	<prefix>download/<accountId>/<blobId>/<name>?type= blob download
-//	<prefix>eventsource                                push (not implemented yet)
+//	<prefix>eventsource                                push (EventSource)
 //
 // Every user is one account, with the id "u" + hex(user name). A user
 // sees their own account and the account of everyone who shared a
@@ -59,11 +59,13 @@ type Handler struct {
 	methods  map[string]method
 	busy     sync.Map // user -> chan struct{}: API request slots
 	uploads  sync.Map // user -> chan struct{}: upload slots
+	streams  sync.Map // user -> chan struct{}: push stream slots
+	hub      *hub
 }
 
 type capability struct {
 	session any               // in the session's capabilities
-	account func(account) any // in each account's accountCapabilities; nil: not an account capability
+	account func(account) any // in each account's accountCapabilities (omitted where it returns nil); nil: not an account capability
 }
 
 // New creates the JMAP handler. ap and lim are shared with DAV and the
@@ -89,6 +91,9 @@ func New(cfg *config.Store, st *store.Store, dataDir string, ap *auth.AppPasswor
 	}
 	h.Register("Core/echo", CapCore, echo)
 	h.registerContacts()
+	h.registerPrincipals()
+	h.hub = newHub(h)
+	st.OnChange(func(owner string, _ store.Kind) { h.hub.mark(owner) })
 	return h
 }
 
@@ -138,6 +143,10 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap lets http.ResponseController reach Flush and the deadlines
+// (push streams).
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *statusWriter) Write(b []byte) (int, error) {
 	if w.status == 0 {
 		w.status = http.StatusOK
@@ -179,7 +188,9 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, ip string) (user
 			h.api(w, r, user)
 		}
 	case rest == "eventsource":
-		http.Error(w, "push is not implemented yet", http.StatusNotImplemented)
+		if allow(w, r, http.MethodGet) {
+			h.eventSource(w, r, user)
+		}
 	case strings.HasPrefix(rest, "upload/"):
 		acct, ok := strings.CutSuffix(strings.TrimPrefix(rest, "upload/"), "/")
 		if !ok || acct == "" || strings.Contains(acct, "/") {
@@ -243,6 +254,7 @@ func ownerOf(id string) (string, bool) {
 // account is what a user can do in one account.
 type account struct {
 	owner    string
+	viewer   string // the user looking at it
 	personal bool
 	readOnly bool // nothing in it is writable for the user
 }
@@ -251,7 +263,7 @@ type account struct {
 // those of users who shared at least one collection with them.
 func (h *Handler) accounts(user string) map[string]account {
 	cfg := h.cfg.Get()
-	out := map[string]account{AccountID(user): {owner: user, personal: true}}
+	out := map[string]account{AccountID(user): {owner: user, viewer: user, personal: true}}
 	groups := cfg.GroupsOf(user)
 	for _, c := range h.store.All() {
 		if c.Owner == user {
@@ -267,7 +279,7 @@ func (h *Handler) accounts(user string) map[string]account {
 		id := AccountID(c.Owner)
 		a, seen := out[id]
 		if !seen {
-			a = account{owner: c.Owner, readOnly: true}
+			a = account{owner: c.Owner, viewer: user, readOnly: true}
 		}
 		if acc == store.AccessWrite {
 			a.readOnly = false

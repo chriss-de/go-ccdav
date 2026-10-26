@@ -35,7 +35,9 @@ func (h *Handler) sessionAccounts(user string) (map[string]sessionAcct, map[stri
 		caps := map[string]any{}
 		for uri, c := range h.caps {
 			if c.account != nil {
-				caps[uri] = c.account(a)
+				if v := c.account(a); v != nil {
+					caps[uri] = v
+				}
 			}
 		}
 		accts[id] = sessionAcct{Name: a.owner, IsPersonal: a.personal, IsReadOnly: a.readOnly, AccountCapabilities: caps}

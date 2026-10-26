@@ -84,10 +84,11 @@ type Store struct {
 	root  string
 	uidOf UIDFunc
 
-	mu    sync.Mutex
-	cols  map[string]*Collection
-	track bool                // account logs on (TrackAccounts)
-	accts map[string]*Account // "<owner>/<kind>"
+	mu       sync.Mutex
+	cols     map[string]*Collection
+	track    bool // account logs on (TrackAccounts)
+	onChange func(owner string, kind Kind)
+	accts    map[string]*Account // "<owner>/<kind>"
 
 	prefs prefsStore
 }

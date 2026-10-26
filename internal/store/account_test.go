@@ -399,3 +399,27 @@ func TestAccountTrackingOff(t *testing.T) {
 		t.Fatal("log written without tracking")
 	}
 }
+
+func TestAccountStateIn(t *testing.T) {
+	s := newTracked(t, t.TempDir())
+	a1, _ := s.CreateCollection("alice", Calendars, "one", Meta{})
+	a2, _ := s.CreateCollection("alice", Calendars, "two", Meta{})
+	a := acct(t, s)
+	put(t, a1, "x")
+	only1 := map[string]bool{a1.ID(): true}
+	_, before := a.StateIn(LevelObjects, only1)
+	put(t, a2, "y")
+	if _, after := a.StateIn(LevelObjects, only1); after != before {
+		t.Fatal("a change in another collection moved the state")
+	}
+	put(t, a1, "z")
+	if _, after := a.StateIn(LevelObjects, only1); after <= before {
+		t.Fatal("a change in the collection didn't move the state")
+	}
+	a2.UpdateMeta(func(m *Meta) { m.Color = "#123456" })
+	_, c1 := a.StateIn(LevelCollections, only1)
+	a1.UpdateMeta(func(m *Meta) { m.Color = "#654321" })
+	if _, c2 := a.StateIn(LevelCollections, only1); c2 <= c1 {
+		t.Fatal("collection state")
+	}
+}

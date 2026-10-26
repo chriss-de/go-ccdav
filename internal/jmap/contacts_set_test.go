@@ -261,7 +261,7 @@ func TestAddressBookSet(t *testing.T) {
 		"shared": map[string]any{"name": "S", "shareWith": map[string]any{"x": map[string]any{"mayRead": true}}},
 		"noname": map[string]any{"description": "d"},
 	}})
-	if setErrType(r, "notCreated", "shared") != SetForbidden || setErrType(r, "notCreated", "noname") != SetInvalidProperties {
+	if setErrType(r, "notCreated", "shared") != SetInvalidProperties || setErrType(r, "notCreated", "noname") != SetInvalidProperties {
 		t.Fatalf("%+v", r.Args)
 	}
 }

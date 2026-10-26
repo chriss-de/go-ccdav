@@ -143,8 +143,9 @@ func run() error {
 	ui := web.New(cfg, st, appPass, limiter, key, defaults, log)
 	mux.Handle(cfg.Get().UIPrefix, ui)
 	mux.HandleFunc("GET /{$}", ui.Landing) // exactly "/"; other methods (PROPFIND) fall through to DAV
+	var jh *jmap.Handler
 	if cfg.Get().JMAP {
-		jh := jmap.New(cfg, st, dataDir, appPass, limiter, defaults, log)
+		jh = jmap.New(cfg, st, dataDir, appPass, limiter, defaults, log)
 		mux.Handle(cfg.Get().JMAPPrefix, jh)
 		mux.Handle("/.well-known/jmap", jh)
 	}
@@ -166,6 +167,9 @@ func run() error {
 		IdleTimeout:       2 * time.Minute,
 		ErrorLog:          slog.NewLogLogger(h, slog.LevelWarn),
 	}
+	if jh != nil {
+		srv.RegisterOnShutdown(jh.Close) // push streams would hold up the shutdown
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -184,6 +188,9 @@ func run() error {
 			}
 			if err := directory.Sync(cfg.Get(), st, server.DefaultAddressBooks); err != nil {
 				log.Error("directory address books", "err", err)
+			}
+			if jh != nil {
+				jh.Changed() // groups decide who sees which account
 			}
 		}
 	}()

@@ -71,6 +71,7 @@ func last(vals []string) string {
 }
 
 func isTrusted(a netip.Addr, trusted []netip.Prefix) bool {
+	a = a.WithZone("") // Contains never matches zoned addresses (fe80::1%eth0)
 	for _, p := range trusted {
 		if p.Contains(a) {
 			return true

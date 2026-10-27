@@ -2,6 +2,7 @@ package store
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // The change log (.changes.log) has one line per change, in token order:
@@ -157,15 +159,22 @@ func (c *Collection) Changes(since uint64) ([]Change, uint64, error) {
 	return l.latest(since), c.token, nil
 }
 
-// logChange appends one line to the change log; the caller holds the
-// write lock.
+// logChange appends one line to the change log, before the change is
+// made; the caller holds the write lock. The token moves only once the
+// line is written.
 func (c *Collection) logChange(op, name string) error {
-	c.token++
 	f, err := os.OpenFile(filepath.Join(c.dir, logName), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o640)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(f, "%d %s %s\n", c.token, op, name)
+	var size int64
+	if fi, serr := f.Stat(); serr == nil {
+		size = fi.Size()
+	}
+	_, err = fmt.Fprintf(f, "%d %s %s\n", c.token+1, op, name)
+	if err != nil {
+		f.Truncate(size) // no torn line for the next append to join
+	}
 	if err == nil {
 		err = f.Sync()
 	}
@@ -175,12 +184,77 @@ func (c *Collection) logChange(op, name string) error {
 	if err != nil {
 		return err
 	}
+	c.token++
 	c.logLines++
-	if c.logLines > 2*len(c.objs)+compactSlack {
+	if c.logLines > c.compactAt() {
 		return c.compact()
 	}
 	return nil
 }
+
+// repairLogTail cuts off a last line without "\n", left by a crash while
+// appending: the next append would be glued to it and lost. It serves the
+// account log too.
+func repairLogTail(path string) error {
+	b, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) || err == nil && (len(b) == 0 || b[len(b)-1] == '\n') {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return os.Truncate(path, int64(bytes.LastIndexByte(b, '\n')+1))
+}
+
+// catchUpSlack: objects modified this long after the log's last write
+// were changed without the server (a write logs first, then changes the
+// file a moment later).
+const catchUpSlack = 2 * time.Second
+
+// catchUp logs, at load, what changed in the files without being logged:
+// files edited, added or removed while the server was off. Objects the log
+// doesn't have (or has as deleted) and objects modified after the log's
+// last write become PUTs, logged objects that are gone DELs. Sync then
+// reports them instead of missing them.
+func (c *Collection) catchUp(l changeLog, mtimes map[string]time.Time, logPath string) error {
+	var logged time.Time
+	if fi, err := os.Stat(logPath); err == nil {
+		logged = fi.ModTime()
+	}
+	newest := map[string]Change{}
+	for _, e := range l.entries {
+		newest[e.Name] = e
+	}
+	var puts, dels []string
+	for name := range c.objs {
+		if e, ok := newest[name]; !ok || e.Deleted || mtimes[name].After(logged.Add(catchUpSlack)) {
+			puts = append(puts, name)
+		}
+	}
+	for name, e := range newest {
+		if _, ok := c.objs[name]; !ok && !e.Deleted {
+			dels = append(dels, name)
+		}
+	}
+	slices.Sort(puts)
+	slices.Sort(dels)
+	for _, name := range puts {
+		if err := c.logChange("PUT", name); err != nil {
+			return err
+		}
+	}
+	for _, name := range dels {
+		if err := c.logChange("DEL", name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// compactAt is the log length that triggers compaction. Compaction keeps
+// up to maxTombstones deletions: they count in, or a collection with few
+// objects would compact on every write.
+func (c *Collection) compactAt() int { return 2*len(c.objs) + maxTombstones + compactSlack }
 
 // compact rewrites the log; the caller holds the write lock.
 func (c *Collection) compact() error {

@@ -126,6 +126,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, ip string) (user 
 	if !ok {
 		return ""
 	}
+	if strings.Contains(strings.ToLower(r.URL.EscapedPath()), "%2f") {
+		// "/" inside a name: names are file names, which can't have one.
+		http.Error(w, "names with an encoded slash (%2F) are not supported", http.StatusBadRequest)
+		return user
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxResourceSize)
 	ctx, cancel := context.WithTimeout(r.Context(), workTimeout)
 	defer cancel()

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Share grants a user or a group access to a collection.
@@ -127,7 +128,44 @@ func (s *Store) LoadAll() error {
 			}
 		}
 	}
-	return nil
+	return s.uniqueSyncIDs()
+}
+
+// uniqueSyncIDs gives a collection a new SyncID if another of the same
+// owner and kind has its SyncID, as a directory copied by hand does: the
+// two would share an id and a sync token space (deleting the copy would
+// log deletions of the original's objects). The oldest .meta.json keeps
+// its id; a copy is usually newer.
+func (s *Store) uniqueSyncIDs() error {
+	type metaAge struct {
+		c   *Collection
+		mod time.Time
+	}
+	groups := map[string][]metaAge{}
+	for _, c := range s.All() {
+		var mod time.Time
+		if fi, err := os.Stat(filepath.Join(c.dir, ".meta.json")); err == nil {
+			mod = fi.ModTime()
+		}
+		k := c.Owner + "/" + string(c.Kind) + "/" + c.SyncID()
+		groups[k] = append(groups[k], metaAge{c, mod})
+	}
+	var errs []error
+	for _, g := range groups {
+		if len(g) < 2 {
+			continue
+		}
+		slices.SortFunc(g, func(a, b metaAge) int {
+			if c := a.mod.Compare(b.mod); c != 0 {
+				return c
+			}
+			return strings.Compare(a.c.Name, b.c.Name)
+		})
+		for _, m := range g[1:] {
+			errs = append(errs, m.c.newSyncID())
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // All returns all loaded collections, sorted by key.
@@ -157,7 +195,7 @@ func (s *Store) ReloadMeta() error {
 		}
 		c.mu.Unlock()
 	}
-	errs = append(errs, s.Reconcile())
+	errs = append(errs, s.reconcile(false)) // while serving: no batch
 	return errors.Join(errs...)
 }
 
@@ -171,6 +209,10 @@ type SharePrefs struct {
 	Hidden      bool   `json:"hidden,omitempty"`
 	Invisible   bool   `json:"invisible,omitempty"` // JMAP isVisible=false
 	Version     uint64 `json:"version,omitempty"`
+	// For is the SyncID of the collection they were made for: a new
+	// collection under the same name starts without them. Empty in
+	// entries from before it was recorded; those adopt the collection.
+	For string `json:"for,omitempty"`
 }
 
 // prefsStore caches data/users/<user>/shared.json files.
@@ -205,29 +247,44 @@ func (s *Store) loadPrefs(user string) (map[string]SharePrefs, error) {
 	return p, nil
 }
 
-// SharePrefs returns user's settings for the collection with the given key.
-func (s *Store) SharePrefs(user, key string) SharePrefs {
+// prefsFor returns the entry of all for c, if it was made for c.
+func prefsFor(all map[string]SharePrefs, c *Collection) SharePrefs {
+	p := all[c.Key()]
+	if p.For != "" && p.For != c.SyncID() {
+		return SharePrefs{} // of a deleted collection with the same name
+	}
+	return p
+}
+
+// SharePrefs returns user's settings for collection c.
+func (s *Store) SharePrefs(user string, c *Collection) SharePrefs {
 	s.prefs.mu.Lock()
 	defer s.prefs.mu.Unlock()
-	p, err := s.loadPrefs(user)
+	all, err := s.loadPrefs(user)
 	if err != nil {
 		return SharePrefs{}
 	}
-	return p[key]
+	return prefsFor(all, c)
 }
 
-// UpdateSharePrefs applies fn and persists the result if it changed.
-func (s *Store) UpdateSharePrefs(user, key string, fn func(*SharePrefs)) error {
+// UpdateSharePrefs applies fn to user's settings for c and persists the
+// result if it changed.
+func (s *Store) UpdateSharePrefs(user string, c *Collection, fn func(*SharePrefs)) error {
 	s.prefs.mu.Lock()
 	defer s.prefs.mu.Unlock()
 	all, err := s.loadPrefs(user)
 	if err != nil {
 		return err
 	}
-	old := all[key]
+	key := c.Key()
+	old := prefsFor(all, c)
 	p := old
 	fn(&p)
-	p.Version = old.Version
+	p.Version, p.For = old.Version, old.For
+	if p == old {
+		return nil
+	}
+	p.For = c.SyncID()
 	if p == old {
 		return nil
 	}

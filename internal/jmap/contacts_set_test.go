@@ -277,7 +277,7 @@ func TestAddressBookSetShared(t *testing.T) {
 	if setErrType(r, "notCreated", "x") != SetForbidden || setErrType(r, "notDestroyed", team.ID()) != SetForbidden {
 		t.Fatalf("%+v", r.Args)
 	}
-	if p := e.st.SharePrefs("alice", team.Key()); p.DisplayName != "Bob's team" || !p.Hidden {
+	if p := e.st.SharePrefs("alice", team); p.DisplayName != "Bob's team" || !p.Hidden {
 		t.Fatalf("prefs %+v", p)
 	}
 	if team.Meta().DisplayName != "Team" {

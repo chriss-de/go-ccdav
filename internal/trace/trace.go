@@ -6,8 +6,10 @@ package trace
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -26,6 +28,7 @@ var redacted = []string{"Authorization", "Cookie", "Set-Cookie", "Proxy-Authoriz
 
 type tracer struct {
 	dir  string
+	run  string // start time: files of earlier runs aren't overwritten
 	next http.Handler
 	log  *slog.Logger
 	n    atomic.Uint64
@@ -36,7 +39,7 @@ func Handler(dir string, next http.Handler, log *slog.Logger) (http.Handler, err
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return &tracer{dir: dir, next: next, log: log}, nil
+	return &tracer{dir: dir, run: time.Now().UTC().Format("20060102T150405.000"), next: next, log: log}, nil
 }
 
 func (t *tracer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -59,9 +62,28 @@ func (t *tracer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(&b, "\n%s\n", rec.body.String())
 
 	user, _, _ := r.BasicAuth()
-	name := fmt.Sprintf("%05d-%s-%s.txt", t.n.Add(1), sanitize(user), r.Method)
-	if err := os.WriteFile(filepath.Join(t.dir, name), b.Bytes(), 0o600); err != nil {
+	if err := t.write(sanitize(user), r.Method, b.Bytes()); err != nil {
 		t.log.Warn("trace", "err", err)
+	}
+}
+
+// write stores one trace in a new file; it never replaces an existing one
+// (of an earlier run that started in the same millisecond, say).
+func (t *tracer) write(user, method string, data []byte) error {
+	for {
+		name := fmt.Sprintf("%s-%05d-%s-%s.txt", t.run, t.n.Add(1), user, method)
+		f, err := os.OpenFile(filepath.Join(t.dir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		_, err = f.Write(data)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		return err
 	}
 }
 

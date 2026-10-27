@@ -102,8 +102,30 @@ type Store struct {
 	prefs prefsStore
 	over  overlays
 
+	broken map[string]error // collections that failed to load, by key (Broken)
+
 	quota atomic.Pointer[func() int64] // per-user bytes, 0 = none (SetQuota)
 	used  map[string]*atomic.Int64     // owner -> bytes of their loaded collections
+}
+
+func (s *Store) markBroken(key string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.broken == nil {
+		s.broken = map[string]error{}
+	}
+	s.broken[key] = err
+}
+
+// Broken returns the collections that could not be loaded (by key, with
+// the reason) and forgets them, so that each is reported once per load.
+// They are left out of listings until fixed on disk.
+func (s *Store) Broken() map[string]error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.broken
+	s.broken = nil
+	return b
 }
 
 // SetQuota sets how many bytes of objects each user may own; q is asked
@@ -205,8 +227,14 @@ func (s *Store) Collections(owner string, kind Kind) ([]*Collection, error) {
 			continue
 		}
 		c, err := s.Collection(owner, kind, e.Name())
+		if errors.Is(err, ErrNotFound) {
+			continue // deleted since the directory was read
+		}
 		if err != nil {
-			return nil, err
+			// One unreadable collection (a corrupt .meta.json) must not
+			// take the others down; Broken reports it.
+			s.markBroken(owner+"/"+string(kind)+"/"+e.Name(), err)
+			continue
 		}
 		out = append(out, c)
 	}
@@ -218,12 +246,20 @@ func (s *Store) Collection(owner string, kind Kind, name string) (*Collection, e
 	if !ValidName(name) || !validHome(owner, kind) {
 		return nil, ErrNotFound
 	}
-	key := owner + "/" + string(kind) + "/" + name
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if c, ok := s.cols[key]; ok {
+	return s.collectionLocked(owner, kind, name)
+}
+
+// collectionLocked is Collection; the caller holds s.mu.
+func (s *Store) collectionLocked(owner string, kind Kind, name string) (*Collection, error) {
+	key := owner + "/" + string(kind) + "/" + name
+	if c, ok := s.cols[key]; ok && !c.gone.Load() {
 		return c, nil
 	}
+	// Not loaded, or deleted (its directory is gone then, unless a new
+	// collection was created under the name): load what is on disk.
+	delete(s.cols, key)
 	c := &Collection{
 		Owner: owner, Kind: kind, Name: name,
 		dir:   filepath.Join(s.homeDir(owner, kind), name),
@@ -234,7 +270,9 @@ func (s *Store) Collection(owner string, kind Kind, name string) (*Collection, e
 	if err := c.load(); err != nil {
 		return nil, err
 	}
-	c.used.Add(c.bytes)
+	if !c.meta.ReadOnly { // generated collections don't count (reserve)
+		c.used.Add(c.bytes)
+	}
 	if s.track {
 		a, err := s.account(owner, kind)
 		if err != nil {
@@ -252,22 +290,28 @@ func (s *Store) CreateCollection(owner string, kind Kind, name string, m Meta) (
 		return nil, ErrBadName
 	}
 	dir := filepath.Join(s.homeDir(owner, kind), name)
-	if err := os.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
-		return nil, err
-	}
-	if err := os.Mkdir(dir, 0o750); err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return nil, ErrExists
+	// Under s.mu until the collection is complete: a lookup (a listing of
+	// the home) must not load the directory before .meta.json is there.
+	s.mu.Lock()
+	c, err := func() (*Collection, error) {
+		if err := os.MkdirAll(filepath.Dir(dir), 0o750); err != nil {
+			return nil, err
 		}
-		return nil, err
-	}
-	m.SyncID = newSyncID()
-	b, _ := json.MarshalIndent(m, "", "  ")
-	if err := writeFileAtomic(filepath.Join(dir, ".meta.json"), b); err != nil {
-		os.RemoveAll(dir)
-		return nil, err
-	}
-	c, err := s.Collection(owner, kind, name)
+		if err := os.Mkdir(dir, 0o750); err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				return nil, ErrExists
+			}
+			return nil, err
+		}
+		m.SyncID = newSyncID()
+		b, _ := json.MarshalIndent(m, "", "  ")
+		if err := writeFileAtomic(filepath.Join(dir, ".meta.json"), b); err != nil {
+			os.RemoveAll(dir)
+			return nil, err
+		}
+		return s.collectionLocked(owner, kind, name)
+	}()
+	s.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
@@ -277,20 +321,32 @@ func (s *Store) CreateCollection(owner string, kind Kind, name string, m Meta) (
 }
 
 // DeleteCollection removes a collection and all its objects.
+// The collection stays in the cache, marked gone, until its directory is
+// removed: a lookup in between must not load it from disk again. If the
+// removal fails, nothing changes in memory.
 func (s *Store) DeleteCollection(c *Collection) error {
-	key := c.Owner + "/" + string(c.Kind) + "/" + c.Name
-	s.mu.Lock()
-	delete(s.cols, key)
-	s.mu.Unlock()
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.deleted = true
+	if c.deleted {
+		c.mu.Unlock()
+		return ErrNotFound
+	}
 	if err := os.RemoveAll(c.dir); err != nil {
+		c.mu.Unlock()
 		return err
 	}
-	c.used.Add(-c.bytes)
+	c.deleted = true
+	c.gone.Store(true)
+	c.reserve(-c.bytes)
 	c.bytes = 0
-	return c.acct.noteCollectionDeleted(c)
+	err := c.acct.noteCollectionDeleted(c)
+	c.mu.Unlock()
+	key := c.Owner + "/" + string(c.Kind) + "/" + c.Name
+	s.mu.Lock()
+	if s.cols[key] == c {
+		delete(s.cols, key)
+	}
+	s.mu.Unlock()
+	return err
 }
 
 // Collection is one calendar or address book.
@@ -310,7 +366,8 @@ type Collection struct {
 	floor    uint64 // sync tokens below this were compacted away
 	logLines int
 	deleted  bool
-	acct     *Account // nil unless the store tracks accounts
+	gone     atomic.Bool // deleted, readable without mu (Store.Collection)
+	acct     *Account    // nil unless the store tracks accounts
 
 	bytes int64         // size of the objects
 	used  *atomic.Int64 // the owner's bytes, shared by their collections
@@ -330,11 +387,20 @@ func (c *Collection) load() error {
 	}
 	c.objs = make(map[string]ObjectInfo)
 	c.uids = make(map[string]string)
+	mtimes := map[string]time.Time{}
 	ents, err := os.ReadDir(c.dir)
 	if err != nil {
 		return err
 	}
 	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), ".tmp-") {
+			// Left by a crash in writeFileAtomic. Only old ones: a write
+			// may be under way (CreateCollection writes .meta.json).
+			if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > time.Minute {
+				os.Remove(filepath.Join(c.dir, e.Name()))
+			}
+			continue
+		}
 		if e.IsDir() || !ValidName(e.Name()) {
 			continue
 		}
@@ -347,17 +413,25 @@ func (c *Collection) load() error {
 			return err
 		}
 		info := c.info(e.Name(), data, fi.ModTime())
+		mtimes[info.Name] = fi.ModTime()
 		c.objs[info.Name] = info
 		c.bytes += info.Size
 		if info.UID != "" {
 			c.uids[info.UID] = info.Name
 		}
 	}
-	l, err := readLog(filepath.Join(c.dir, logName))
+	logPath := filepath.Join(c.dir, logName)
+	if err := repairLogTail(logPath); err != nil {
+		return err
+	}
+	l, err := readLog(logPath)
 	if err != nil {
 		return err
 	}
 	c.token, c.floor, c.logLines = l.last(), l.floor, len(l.entries)
+	if err := c.catchUp(l, mtimes, logPath); err != nil {
+		return err
+	}
 	if c.meta.SyncID == "" {
 		// Collections from before sync support get an ID once.
 		c.meta.SyncID = newSyncID()
@@ -415,14 +489,15 @@ func (c *Collection) UpdateMeta(fn func(*Meta)) error {
 	if old, _ := json.MarshalIndent(c.meta, "", "  "); bytes.Equal(old, b) {
 		return nil
 	}
+	// Bump the token so clients notice property changes (color, name);
+	// logged first, as in Put.
+	if err := c.logChange("META", "-"); err != nil {
+		return err
+	}
 	if err := writeFileAtomic(filepath.Join(c.dir, ".meta.json"), b); err != nil {
 		return err
 	}
 	c.meta = m
-	// Bump the token so clients notice property changes (color, name).
-	if err := c.logChange("META", "-"); err != nil {
-		return err
-	}
 	return c.acct.noteCollection(c)
 }
 
@@ -532,25 +607,29 @@ func (c *Collection) Put(name string, data []byte, cond Cond) (info ObjectInfo, 
 	}
 	old, existed := c.objs[name]
 	grow := info.Size - old.Size
-	if grow > 0 && !c.meta.ReadOnly && c.quota != nil {
-		if q := c.quota(); q > 0 && c.used.Load()+grow > q {
-			return ObjectInfo{}, false, ErrQuota
-		}
+	// Taken from the owner's usage before writing, so that concurrent
+	// writes to their other collections can't all pass the check.
+	if err := c.reserve(grow); err != nil {
+		return ObjectInfo{}, false, err
+	}
+	// Logged first: a crash in between leaves a logged change that didn't
+	// happen (harmless: the client finds the object as it is), never a
+	// change sync doesn't report.
+	if err := c.logChange("PUT", name); err != nil {
+		c.reserve(-grow)
+		return ObjectInfo{}, false, err
 	}
 	if err := writeFileAtomic(filepath.Join(c.dir, name), data); err != nil {
+		c.reserve(-grow)
 		return ObjectInfo{}, false, err
 	}
 	c.bytes += grow
-	c.used.Add(grow)
-	if existed && old.UID != "" {
-		delete(c.uids, old.UID)
+	if existed {
+		c.dropUID(old.UID, name)
 	}
 	c.objs[name] = info
 	if info.UID != "" {
 		c.uids[info.UID] = name
-	}
-	if err := c.logChange("PUT", name); err != nil {
-		return info, !existed, err
 	}
 	return info, !existed, c.acct.noteObject(c, info)
 }
@@ -559,6 +638,9 @@ func (c *Collection) Put(name string, data []byte, cond Cond) (info ObjectInfo, 
 func (c *Collection) Delete(name string, cond Cond) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.deleted {
+		return ErrNotFound // its directory may belong to a new collection
+	}
 	o, ok := c.objs[name]
 	if !ok {
 		return ErrNotFound
@@ -566,18 +648,16 @@ func (c *Collection) Delete(name string, cond Cond) error {
 	if err := c.check(name, cond); err != nil {
 		return err
 	}
+	if err := c.logChange("DEL", name); err != nil { // first, as in Put
+		return err
+	}
 	if err := os.Remove(filepath.Join(c.dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	delete(c.objs, name)
 	c.bytes -= o.Size
-	c.used.Add(-o.Size)
-	if o.UID != "" {
-		delete(c.uids, o.UID)
-	}
-	if err := c.logChange("DEL", name); err != nil {
-		return err
-	}
+	c.reserve(-o.Size)
+	c.dropUID(o.UID, name)
 	return c.acct.noteObjectDeleted(c, name)
 }
 
@@ -623,24 +703,78 @@ func (c *Collection) Move(name string, to *Collection, newName string, cond Cond
 		return ObjectInfo{}, err
 	}
 	info := to.info(newName, data, time.Now())
+	if err := errors.Join(c.logChange("DEL", name), to.logChange("PUT", newName)); err != nil { // first, as in Put
+		return ObjectInfo{}, err
+	}
 	if err := writeFileAtomic(filepath.Join(to.dir, newName), data); err != nil {
 		return ObjectInfo{}, err
 	}
 	if err := os.Remove(filepath.Join(c.dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		os.Remove(filepath.Join(to.dir, newName)) // no copy the index doesn't know
 		return ObjectInfo{}, err
 	}
 	delete(c.objs, name)
 	c.bytes -= o.Size // same owner: their usage stays
 	to.bytes += info.Size
 	if o.UID != "" {
-		delete(c.uids, o.UID)
+		c.dropUID(o.UID, name)
 		to.uids[o.UID] = newName
 	}
 	to.objs[newName] = info
-	if err := errors.Join(c.logChange("DEL", name), to.logChange("PUT", newName)); err != nil {
-		return info, err
-	}
 	return info, c.acct.noteMove(c, name, to, info)
+}
+
+// dropUID removes name's entry for uid from the UID index. If another
+// object has the UID too (files copied by hand), the index then points at
+// that one. The caller holds the write lock.
+func (c *Collection) dropUID(uid, name string) {
+	if uid == "" || c.uids[uid] != name {
+		return
+	}
+	delete(c.uids, uid)
+	for n, o := range c.objs {
+		if n != name && o.UID == uid {
+			c.uids[uid] = n
+			return
+		}
+	}
+}
+
+// reserve changes the owner's usage by n bytes; growth fails with ErrQuota
+// past the quota. Generated (read-only) collections don't count. The
+// caller holds the write lock.
+func (c *Collection) reserve(n int64) error {
+	if n == 0 || c.meta.ReadOnly {
+		return nil
+	}
+	q := int64(0)
+	if n > 0 && c.quota != nil {
+		q = c.quota()
+	}
+	for {
+		u := c.used.Load()
+		if q > 0 && u+n > q {
+			return ErrQuota
+		}
+		if c.used.CompareAndSwap(u, u+n) {
+			return nil
+		}
+	}
+}
+
+// newSyncID gives the collection a new SyncID: old sync tokens become
+// invalid and its account-log id changes.
+func (c *Collection) newSyncID() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.metaCopy()
+	m.SyncID = newSyncID()
+	b, _ := json.MarshalIndent(m, "", "  ")
+	if err := writeFileAtomic(filepath.Join(c.dir, ".meta.json"), b); err != nil {
+		return err
+	}
+	c.meta = m
+	return nil
 }
 
 // ByUID returns the object name holding uid.

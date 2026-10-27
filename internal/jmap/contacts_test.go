@@ -266,7 +266,7 @@ func TestContactsShared(t *testing.T) {
 	// Alice renames and hides it for herself: her AddressBook state moves
 	// on (a resync), and she sees her own settings.
 	state := e.api("alice", call("AddressBook/get", map[string]any{"accountId": e.bob, "ids": []string{}}, "0"))[0].Args["state"].(string)
-	e.st.UpdateSharePrefs("alice", shared.Key(), func(p *store.SharePrefs) { p.DisplayName = "Bob's team"; p.Hidden = true })
+	e.st.UpdateSharePrefs("alice", shared, func(p *store.SharePrefs) { p.DisplayName = "Bob's team"; p.Hidden = true })
 	r = e.api("alice", call("AddressBook/changes", map[string]any{"accountId": e.bob, "sinceState": state}, "0"))[0]
 	if errType(r) != ErrCannotCalculateChanges {
 		t.Fatalf("prefs change: %+v", r)

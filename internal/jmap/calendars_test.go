@@ -67,7 +67,7 @@ func TestCalendarSessionAndGet(t *testing.T) {
 	// Shared read-only with alice, who picked her own color.
 	bc, _ := e.st.CreateCollection("bob", store.Calendars, "team", store.Meta{DisplayName: "Team", Color: "#00ff00"})
 	bc.SetShares([]store.Share{{User: "alice", Access: store.AccessRead}})
-	e.st.UpdateSharePrefs("alice", bc.Key(), func(p *store.SharePrefs) { p.Color = "#ff0000" })
+	e.st.UpdateSharePrefs("alice", bc, func(p *store.SharePrefs) { p.Color = "#ff0000" })
 	c = e.api("alice", call("Calendar/get", map[string]any{"accountId": e.bob}, "0"))[0].Args["list"].([]any)[0].(map[string]any)
 	rights = c["myRights"].(map[string]any)
 	if c["color"] != "#ff0000" || c["shareWith"] != nil || rights["mayWriteAll"] != false || rights["mayReadItems"] != true {

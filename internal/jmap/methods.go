@@ -96,7 +96,7 @@ func (v *View) tag(l store.Level) string {
 	for _, id := range slices.Sorted(maps.Keys(v.Access)) {
 		fmt.Fprintf(sum, "%s:%s", id, v.Access[id])
 		if l == store.LevelCollections {
-			fmt.Fprintf(sum, ":%d", v.st.SharePrefs(v.User, v.Colls[id].Key()).Version)
+			fmt.Fprintf(sum, ":%d", v.st.SharePrefs(v.User, v.Colls[id]).Version)
 		}
 		sum.Write([]byte{'\n'})
 	}

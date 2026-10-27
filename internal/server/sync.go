@@ -71,13 +71,13 @@ func (s *Server) syncCollection(ctx context.Context, w http.ResponseWriter, user
 		dav.WriteError(w, http.StatusForbidden, dav.N(dav.NSDAV, "supported-report"), "sync-collection is only supported on calendars and address books")
 		return
 	}
-	if lvl := strings.TrimSpace(body.Child(dav.NSDAV, "sync-level").Text); lvl != "" && lvl != "1" && lvl != "infinite" {
+	if lvl := strings.TrimSpace(body.ChildText(dav.NSDAV, "sync-level")); lvl != "" && lvl != "1" && lvl != "infinite" {
 		http.Error(w, "bad sync-level", http.StatusBadRequest)
 		return
 	}
 	limit := 0
 	if l := body.Child(dav.NSDAV, "limit"); l != nil {
-		n, err := strconv.Atoi(strings.TrimSpace(l.Child(dav.NSDAV, "nresults").Text))
+		n, err := strconv.Atoi(strings.TrimSpace(l.ChildText(dav.NSDAV, "nresults")))
 		if err != nil || n < 1 {
 			http.Error(w, "bad limit", http.StatusBadRequest)
 			return
@@ -86,7 +86,7 @@ func (s *Server) syncCollection(ctx context.Context, w http.ResponseWriter, user
 	}
 	col := res.col
 	id := col.SyncID()
-	tok := strings.TrimSpace(body.Child(dav.NSDAV, "sync-token").Text)
+	tok := strings.TrimSpace(body.ChildText(dav.NSDAV, "sync-token"))
 	since, err := parseSyncToken(tok, id)
 	var changes []store.Change
 	var cur uint64

@@ -65,6 +65,39 @@ func FreeBusy(ctx context.Context, cals []*ical.Component, from, to time.Time, f
 				}
 			}
 		}
+		// Stored VFREEBUSY components count too (RFC 4791 §7.10).
+		for _, fb := range cal.ChildrenNamed("VFREEBUSY") {
+			for _, p := range fb.PropsNamed("FREEBUSY") {
+				typ := strings.ToUpper(p.Param("FBTYPE"))
+				switch typ {
+				case "":
+					typ = FBBusy
+				case "FREE":
+					continue
+				}
+				starts, ends, err := rrule.ParseDateTimeList(p, cal, floating)
+				if err != nil {
+					continue
+				}
+				for i, st := range starts {
+					start, end := st.Time, ends[i]
+					if start.Before(from) {
+						start = from
+					}
+					if end.After(to) {
+						end = to
+					}
+					if end.After(start) {
+						ps = append(ps, Period{start.UTC(), end.UTC(), typ})
+					}
+				}
+				if len(ps) >= 2*MaxFreeBusyPeriods {
+					if ps = mergePeriods(ps); len(ps) > MaxFreeBusyPeriods {
+						return nil, ErrFreeBusyTooLarge
+					}
+				}
+			}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err

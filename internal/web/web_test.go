@@ -372,7 +372,7 @@ func TestCollectionsAndSharingUI(t *testing.T) {
 	b.post("shares", http.StatusBadRequest, "key", work.Key(), "target", "group:fam", "access", "write")
 	// His own view: name and color go to his prefs only.
 	b.post("collections/edit", http.StatusSeeOther, "key", work.Key(), "displayname", "Alice job", "color", "#123456")
-	if p := e.st.SharePrefs("bob", work.Key()); p.DisplayName != "Alice job" || p.Color != "#123456" {
+	if p := e.st.SharePrefs("bob", work); p.DisplayName != "Alice job" || p.Color != "#123456" {
 		t.Fatalf("%+v", p)
 	}
 	if work.Meta().DisplayName != "Job" {

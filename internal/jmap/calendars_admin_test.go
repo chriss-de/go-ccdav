@@ -72,7 +72,7 @@ func TestCalendarSetShared(t *testing.T) {
 	if setErrType(r, "notCreated", "x") != SetForbidden || setErrType(r, "notDestroyed", team.ID()) != SetForbidden {
 		t.Fatalf("%+v", r.Args)
 	}
-	if p := e.st.SharePrefs("alice", team.Key()); p.DisplayName != "Bob's team" || p.Color != "#ff0000" || !p.Invisible {
+	if p := e.st.SharePrefs("alice", team); p.DisplayName != "Bob's team" || p.Color != "#ff0000" || !p.Invisible {
 		t.Fatalf("prefs %+v", p)
 	}
 	for _, prop := range []map[string]any{{"description": "x"}, {"timeZone": "Europe/Berlin"}, {"includeInAvailability": "none"}} {

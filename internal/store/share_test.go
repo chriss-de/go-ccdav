@@ -71,14 +71,16 @@ func TestLoadAllAndNames(t *testing.T) {
 func TestSharePrefs(t *testing.T) {
 	root := t.TempDir()
 	s := New(root, uidOf)
-	if p := s.SharePrefs("bob", "alice/calendars/a"); p != (SharePrefs{}) {
+	a, _ := s.CreateCollection("alice", Calendars, "a", Meta{})
+	if p := s.SharePrefs("bob", a); p != (SharePrefs{}) {
 		t.Fatal(p)
 	}
-	s.UpdateSharePrefs("bob", "alice/calendars/a", func(p *SharePrefs) { p.Color = "#f00" })
-	s.UpdateSharePrefs("bob", "alice/calendars/a", func(p *SharePrefs) { p.Color = "#f00" }) // no-op
-	s.UpdateSharePrefs("bob", "alice/calendars/a", func(p *SharePrefs) { p.Hidden = true; p.Version = 99 })
+	s.UpdateSharePrefs("bob", a, func(p *SharePrefs) { p.Color = "#f00" })
+	s.UpdateSharePrefs("bob", a, func(p *SharePrefs) { p.Color = "#f00" }) // no-op
+	s.UpdateSharePrefs("bob", a, func(p *SharePrefs) { p.Hidden = true; p.Version = 99 })
 	s2 := New(root, uidOf)
-	p := s2.SharePrefs("bob", "alice/calendars/a")
+	a2, _ := s2.Collection("alice", Calendars, "a")
+	p := s2.SharePrefs("bob", a2)
 	if p.Color != "#f00" || !p.Hidden || p.Version != 2 {
 		t.Fatalf("%+v", p)
 	}

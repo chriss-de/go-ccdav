@@ -270,7 +270,7 @@ func (s *Server) groupProp(res *resource, name xml.Name) (string, int) {
 func (s *Server) ctag(res *resource) string {
 	t := strconv.FormatUint(res.col.SyncToken(), 10)
 	if res.isShared() {
-		t += "." + strconv.FormatUint(s.store.SharePrefs(res.owner, res.col.Key()).Version, 10)
+		t += "." + strconv.FormatUint(s.store.SharePrefs(res.owner, res.col).Version, 10)
 	}
 	if v := s.overlayVersion(res); v >= 0 {
 		t += "." + strconv.FormatInt(v, 10) // their own alarms etc. (caldav_per_user)
@@ -281,7 +281,7 @@ func (s *Server) ctag(res *resource) string {
 func (s *Server) syncToken(res *resource, n uint64) string {
 	t := formatSyncToken(res.col.SyncID(), n)
 	if res.isShared() {
-		t += "." + strconv.FormatUint(s.store.SharePrefs(res.owner, res.col.Key()).Version, 10)
+		t += "." + strconv.FormatUint(s.store.SharePrefs(res.owner, res.col).Version, 10)
 	}
 	if v := s.overlayVersion(res); v >= 0 {
 		t += "." + strconv.FormatInt(v, 10)
@@ -300,7 +300,7 @@ func (s *Server) collectionProp(res *resource, name xml.Name) (string, int) {
 	m := res.col.Meta()
 	if res.isShared() {
 		// The sharee's own name, color and order override the owner's.
-		p := s.store.SharePrefs(res.owner, res.col.Key())
+		p := s.store.SharePrefs(res.owner, res.col)
 		dn := m.DisplayName
 		if dn == "" {
 			dn = res.col.Name

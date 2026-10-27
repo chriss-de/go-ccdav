@@ -68,6 +68,14 @@ func env(key, def string) string {
 	return def
 }
 
+// logBroken reports collections that could not be loaded; they stay out
+// of service until fixed on disk.
+func logBroken(log *slog.Logger, st *store.Store) {
+	for key, err := range st.Broken() {
+		log.Error("collection not loaded", "collection", key, "err", err)
+	}
+}
+
 // locate returns the config file: cfgFile if set, else the one found in
 // the data directory (default "data").
 func locate(data, cfgFile string) (string, error) {
@@ -129,6 +137,7 @@ func run() error {
 	if err := st.Reconcile(); err != nil {
 		return err
 	}
+	logBroken(log, st) // after LoadAll and Reconcile
 	key, err := web.LoadOrCreateKey(filepath.Join(dataDir, "session.key"))
 	if err != nil {
 		return err
@@ -187,6 +196,7 @@ func run() error {
 			if err := st.ReloadMeta(); err != nil {
 				log.Error("reloading collection metadata", "err", err)
 			}
+			logBroken(log, st)
 			if err := directory.Sync(cfg.Get(), st, server.DefaultAddressBooks); err != nil {
 				log.Error("directory address books", "err", err)
 			}

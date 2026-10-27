@@ -130,6 +130,9 @@ type Account struct {
 func loadAccount(path, owner string, kind Kind) (*Account, error) {
 	a := &Account{Owner: owner, Kind: kind, path: path,
 		latest: map[Level]uint64{}, cur: map[string]acctEntry{}, byLoc: map[string]string{}}
+	if err := repairLogTail(path); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		a.home = newSyncID()
@@ -225,7 +228,14 @@ func (a *Account) append(e acctEntry) error {
 	if err != nil {
 		return err
 	}
+	var size int64
+	if fi, serr := f.Stat(); serr == nil {
+		size = fi.Size()
+	}
 	_, err = f.WriteString(e.line())
+	if err != nil {
+		f.Truncate(size) // no torn line for the next append to join
+	}
 	if err == nil {
 		err = f.Sync()
 	}
@@ -249,7 +259,7 @@ func (a *Account) changed() {
 // maybeCompact compacts once the log has grown well past what it
 // describes; the caller holds mu.
 func (a *Account) maybeCompact() error {
-	if len(a.log) > 2*len(a.byLoc)+compactSlack {
+	if len(a.log) > 2*len(a.byLoc)+maxTombstones+compactSlack { // as in logChange
 		return a.compact()
 	}
 	return nil
@@ -286,20 +296,43 @@ func (a *Account) endBatch() error {
 // compact rewrites the log with the newest line per id and at most
 // maxTombstones deletions; the caller holds mu.
 func (a *Account) compact() error {
-	kept := make([]acctEntry, 0, len(a.cur))
+	// Each id's newest move line stays too: it says where the object came
+	// from (Changes' From, StateIn of the old collection). Older moves are
+	// dropped, and with them the states before them (the floor).
+	lastMove := map[string]acctEntry{}
+	var droppedMoves uint64
+	for _, e := range a.log {
+		if e.Moved == e.Token && e.MovedFrom != "" {
+			key := string(e.Level) + e.ID
+			if prev, ok := lastMove[key]; ok {
+				droppedMoves = max(droppedMoves, prev.Token)
+			}
+			lastMove[key] = e
+		}
+	}
+	kept := make([]acctEntry, 0, len(a.cur)+len(lastMove))
 	var dels []uint64
-	for _, e := range a.cur {
+	for key, e := range a.cur {
 		kept = append(kept, e)
 		if e.Deleted {
 			dels = append(dels, e.Token)
 		}
+		if m, ok := lastMove[key]; ok && m.Token != e.Token {
+			kept = append(kept, m)
+		}
 	}
-	floor := a.floor
+	floor := max(a.floor, droppedMoves)
 	if extra := len(dels) - maxTombstones; extra > 0 {
 		slices.Sort(dels)
 		cutoff := dels[extra-1]
 		floor = max(floor, cutoff)
-		kept = slices.DeleteFunc(kept, func(e acctEntry) bool { return e.Deleted && e.Token <= cutoff })
+		gone := map[string]bool{}
+		for _, e := range kept {
+			if e.Deleted && e.Token <= cutoff {
+				gone[string(e.Level)+e.ID] = true
+			}
+		}
+		kept = slices.DeleteFunc(kept, func(e acctEntry) bool { return gone[string(e.Level)+e.ID] })
 	}
 	slices.SortFunc(kept, func(x, y acctEntry) int { return cmpUint(x.Token, y.Token) })
 	var sb strings.Builder
@@ -675,8 +708,15 @@ func (s *Store) CollectionByID(owner string, kind Kind, id string) (*Collection,
 // Reconcile brings the account logs in line with the files: it loads
 // every collection (logging new and changed ones and their objects) and
 // logs deletions of collections and objects that are gone. A no-op
-// without TrackAccounts.
-func (s *Store) Reconcile() error {
+// without TrackAccounts. It batches the log writes (one fsync per
+// account), so it must run before the store serves anything else.
+func (s *Store) Reconcile() error { return s.reconcile(true) }
+
+// reconcile is Reconcile; with batch, log lines are fsynced together at
+// the end, which is only safe while nothing else writes: other writes
+// would go through the batch unsynced, with their states already handed
+// out.
+func (s *Store) reconcile(batch bool) error {
 	if !s.track {
 		return nil
 	}
@@ -690,8 +730,10 @@ func (s *Store) Reconcile() error {
 	}
 	s.mu.Unlock()
 	var errs []error
-	for _, a := range accts {
-		errs = append(errs, a.beginBatch())
+	if batch {
+		for _, a := range accts {
+			errs = append(errs, a.beginBatch())
+		}
 	}
 	cols := s.All()
 	for _, c := range cols {
@@ -705,7 +747,10 @@ func (s *Store) Reconcile() error {
 		c.mu.RUnlock()
 	}
 	for _, a := range accts {
-		errs = append(errs, s.reconcileDeletions(a, cols), a.endBatch())
+		errs = append(errs, s.reconcileDeletions(a, cols))
+		if batch {
+			errs = append(errs, a.endBatch())
+		}
 	}
 	errs = append(errs, s.pruneOverlays())
 	return errors.Join(errs...)

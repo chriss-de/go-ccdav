@@ -314,7 +314,7 @@ func (u *UI) view(col *store.Collection, user, acc string) colView {
 		}
 		return v
 	}
-	p := u.st.SharePrefs(user, col.Key())
+	p := u.st.SharePrefs(user, col)
 	if p.DisplayName != "" {
 		v.DisplayName = p.DisplayName
 	}
@@ -415,7 +415,7 @@ func (u *UI) post(w http.ResponseWriter, r *http.Request, path string) {
 		hide := f.Get("hidden") == "1"
 		msg = map[bool]string{true: "hidden", false: "shown"}[hide]
 		err = u.withShared(user, f.Get("key"), func(col *store.Collection) error {
-			return u.st.UpdateSharePrefs(user, col.Key(), func(p *store.SharePrefs) { p.Hidden = hide })
+			return u.st.UpdateSharePrefs(user, col, func(p *store.SharePrefs) { p.Hidden = hide })
 		})
 	case "shares":
 		err, msg = u.changeShare(user, f.Get("key"), f.Get("target"), f.Get("access")), "shared"
@@ -566,7 +566,7 @@ func (u *UI) editCollection(user, key, name, color, desc string, comps []string)
 	}
 	// Shared with the user: only their own name and color.
 	return u.withShared(user, key, func(col *store.Collection) error {
-		return u.st.UpdateSharePrefs(user, col.Key(), func(p *store.SharePrefs) {
+		return u.st.UpdateSharePrefs(user, col, func(p *store.SharePrefs) {
 			p.DisplayName = name
 			if color != "" {
 				p.Color = keepAlpha(p.Color, color)

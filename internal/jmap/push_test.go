@@ -126,7 +126,7 @@ func TestPushSharedAccounts(t *testing.T) {
 		t.Fatalf("shared change %+v", ev)
 	}
 	// Types filter: an AddressBook change isn't sent to a ContactCard stream.
-	e.st.UpdateSharePrefs("alice", shared.Key(), func(p *store.SharePrefs) { p.DisplayName = "Team" })
+	e.st.UpdateSharePrefs("alice", shared, func(p *store.SharePrefs) { p.DisplayName = "Team" })
 	if ev, ok := next(t, ch, 300*time.Millisecond); ok {
 		t.Fatalf("filtered type sent: %+v", ev)
 	}

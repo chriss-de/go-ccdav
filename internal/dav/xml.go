@@ -74,6 +74,15 @@ func (e *Element) Child(ns, local string) *Element {
 	return nil
 }
 
+// ChildText returns the text of the first child with the given name, ""
+// if there is none.
+func (e *Element) ChildText(ns, local string) string {
+	if c := e.Child(ns, local); c != nil {
+		return c.Text
+	}
+	return ""
+}
+
 // ChildrenNamed returns all children with the given name.
 func (e *Element) ChildrenNamed(ns, local string) []*Element {
 	if e == nil {
@@ -265,6 +274,18 @@ func (r *Response) AddProp(status int, p Prop) {
 	r.Props[status] = append(r.Props[status], p)
 }
 
+// Has reports whether r has a property of that name, under any status.
+func (r *Response) Has(name xml.Name) bool {
+	for _, props := range r.Props {
+		for _, p := range props {
+			if p.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Multistatus is a 207 response body.
 type Multistatus struct {
 	Responses []*Response
@@ -275,14 +296,50 @@ func statusLine(code int) string {
 	return "HTTP/1.1 " + strconv.Itoa(code) + " " + http.StatusText(code)
 }
 
-func (m *Multistatus) String() string {
-	var sb strings.Builder
+// openRoot writes the XML declaration and the root's start tag with the
+// common namespace prefixes.
+func openRoot(sb *strings.Builder, root string) {
 	sb.WriteString(`<?xml version="1.0" encoding="utf-8"?>` + "\n")
-	sb.WriteString(`<d:multistatus`)
+	sb.WriteString(`<d:` + root)
 	for _, ns := range []string{NSDAV, NSCalDAV, NSCardDAV, NSCS, NSApple} {
 		sb.WriteString(` xmlns:` + prefixes[ns] + `="` + ns + `"`)
 	}
 	sb.WriteString(">")
+}
+
+// writePropstats writes r's propstat elements, by status.
+func (r *Response) writePropstats(sb *strings.Builder) {
+	codes := make([]int, 0, len(r.Props))
+	for c := range r.Props {
+		codes = append(codes, c)
+	}
+	slices.Sort(codes)
+	for _, c := range codes {
+		sb.WriteString("<d:propstat><d:prop>")
+		for _, p := range r.Props[c] {
+			sb.WriteString(E(p.Name, p.Value))
+		}
+		sb.WriteString("</d:prop>")
+		sb.WriteString(T(N(NSDAV, "status"), statusLine(c)))
+		sb.WriteString("</d:propstat>")
+	}
+}
+
+// WriteMkcolResponse answers a failed extended MKCOL (RFC 5689 §3.5):
+// code with a DAV:mkcol-response of r's propstats.
+func WriteMkcolResponse(w http.ResponseWriter, code int, r *Response) {
+	var sb strings.Builder
+	openRoot(&sb, "mkcol-response")
+	r.writePropstats(&sb)
+	sb.WriteString("</d:mkcol-response>\n")
+	w.Header().Set("Content-Type", `application/xml; charset="utf-8"`)
+	w.WriteHeader(code)
+	io.WriteString(w, sb.String())
+}
+
+func (m *Multistatus) String() string {
+	var sb strings.Builder
+	openRoot(&sb, "multistatus")
 	for _, r := range m.Responses {
 		sb.WriteString("<d:response>")
 		sb.WriteString(Href(r.Href))
@@ -293,20 +350,7 @@ func (m *Multistatus) String() string {
 			}
 			sb.WriteString(T(N(NSDAV, "status"), statusLine(st)))
 		}
-		codes := make([]int, 0, len(r.Props))
-		for c := range r.Props {
-			codes = append(codes, c)
-		}
-		slices.Sort(codes)
-		for _, c := range codes {
-			sb.WriteString("<d:propstat><d:prop>")
-			for _, p := range r.Props[c] {
-				sb.WriteString(E(p.Name, p.Value))
-			}
-			sb.WriteString("</d:prop>")
-			sb.WriteString(T(N(NSDAV, "status"), statusLine(c)))
-			sb.WriteString("</d:propstat>")
-		}
+		r.writePropstats(&sb)
 		if r.Error != "" {
 			sb.WriteString(E(N(NSDAV, "error"), r.Error))
 		}

@@ -162,8 +162,20 @@ func Split(next, owner map[string]any) (file map[string]any, d Data) {
 			}
 		}
 		for path, val := range op {
-			if IsPerUserPath(path) {
-				fp[path] = val // the owner's own per-user values stay
+			if !IsPerUserPath(path) {
+				continue
+			}
+			fp[path] = val // the owner's own per-user values stay
+			if _, kept := np[path]; !kept {
+				// Removed by the user: null, which in an override patch
+				// removes the value for this occurrence.
+				if d.Overrides == nil {
+					d.Overrides = map[string]map[string]any{}
+				}
+				if d.Overrides[rid] == nil {
+					d.Overrides[rid] = map[string]any{}
+				}
+				d.Overrides[rid][path] = nil
 			}
 		}
 		// An entry only the user's values made would be an extra date

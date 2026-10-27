@@ -214,6 +214,11 @@ func (s *Server) resolve(path, user string) (*resource, error) {
 		if res.acc = s.access(user, col); res.acc == accNone {
 			return nil, store.ErrNotFound
 		}
+		// Deleted by the sharee (DELETE hides it): gone for DAV, as RFC
+		// 4918 §9.6.1 wants; the web UI can show it again.
+		if s.store.SharePrefs(user, col).Hidden {
+			return nil, store.ErrNotFound
+		}
 		res.col = col
 	} else {
 		col, err := s.store.Collection(owner, sk, segs[2])
@@ -285,7 +290,7 @@ func (s *Server) children(res *resource) ([]*resource, error) {
 				continue
 			}
 			acc := s.access(res.owner, c)
-			if acc == accNone || s.store.SharePrefs(res.owner, c.Key()).Hidden {
+			if acc == accNone || s.store.SharePrefs(res.owner, c).Hidden {
 				continue
 			}
 			out = append(out, &resource{base: base, kind: kCollection, sk: res.sk, owner: res.owner,

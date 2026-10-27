@@ -42,6 +42,7 @@ func (s *Server) propfind(w http.ResponseWriter, r *http.Request, res *resource)
 	var (
 		reqProps []*dav.Element
 		names    bool
+		include  []*dav.Element // with allprop (RFC 4918 §14.8)
 	)
 	if body != nil {
 		if body.Name != dav.N(dav.NSDAV, "propfind") {
@@ -56,12 +57,27 @@ func (s *Server) propfind(w http.ResponseWriter, r *http.Request, res *resource)
 			}
 		case body.Child(dav.NSDAV, "propname") != nil:
 			names = true
+		case body.Child(dav.NSDAV, "include") != nil:
+			include = body.Child(dav.NSDAV, "include").Children
 		}
 	}
 	user := userOf(r)
 	ms := &dav.Multistatus{}
 	exp := caldav.NewExpandBudget(r.Context())
-	ms.Responses = append(ms.Responses, s.responseFor(user, res, reqProps, names, exp))
+	respond := func(res *resource) *dav.Response {
+		resp := s.responseFor(user, res, reqProps, names, exp)
+		for _, el := range include {
+			if !resp.Has(el.Name) {
+				v, st := s.propValue(user, res, el.Name, el, exp)
+				if st != http.StatusOK {
+					v = ""
+				}
+				resp.AddProp(st, dav.Prop{Name: el.Name, Value: v})
+			}
+		}
+		return resp
+	}
+	ms.Responses = append(ms.Responses, respond(res))
 	if depth == 1 && res.isCollection() {
 		kids, err := s.children(res)
 		if err != nil {
@@ -69,7 +85,7 @@ func (s *Server) propfind(w http.ResponseWriter, r *http.Request, res *resource)
 			return
 		}
 		for _, k := range kids {
-			ms.Responses = append(ms.Responses, s.responseFor(user, k, reqProps, names, exp))
+			ms.Responses = append(ms.Responses, respond(k))
 		}
 	}
 	writeMultistatus(r.Context(), w, ms)
@@ -123,7 +139,7 @@ func (s *Server) proppatch(w http.ResponseWriter, r *http.Request, res *resource
 	failed := false
 	if res.isShared() {
 		// A sharee only changes their own view (name, color, order).
-		err = s.store.UpdateSharePrefs(res.owner, res.col.Key(), func(p *store.SharePrefs) {
+		err = s.store.UpdateSharePrefs(res.owner, res.col, func(p *store.SharePrefs) {
 			trial := *p
 			for i, el := range els {
 				statuses[i] = applySharedProp(&trial, el, removes[i])
@@ -168,7 +184,7 @@ func (s *Server) mkcollection(w http.ResponseWriter, r *http.Request, res *resou
 		return
 	}
 	if res.col != nil {
-		w.Header().Set("Allow", "OPTIONS, GET, HEAD, DELETE, PROPFIND, PROPPATCH, REPORT")
+		w.Header().Set("Allow", allowOnCollection)
 		http.Error(w, "already exists", http.StatusMethodNotAllowed)
 		return
 	}
@@ -243,11 +259,17 @@ func (s *Server) mkcollection(w http.ResponseWriter, r *http.Request, res *resou
 				}
 			}
 		}
-		(&dav.Multistatus{Responses: []*dav.Response{resp}}).Write(w)
+		if extended {
+			// RFC 5689 §3.5: not a 2xx, which clients take for success.
+			dav.WriteMkcolResponse(w, http.StatusForbidden, resp)
+			return
+		}
+		(&dav.Multistatus{Responses: []*dav.Response{resp}}).Write(w) // MKCALENDAR: RFC 4791 §5.3.1
 		return
 	}
 	if _, err := s.store.CreateCollection(res.owner, res.sk, res.colName, m); err != nil {
 		if errors.Is(err, store.ErrExists) {
+			w.Header().Set("Allow", allowOnCollection)
 			http.Error(w, "already exists", http.StatusMethodNotAllowed)
 			return
 		}
@@ -307,9 +329,13 @@ func isKnownComp(name string) bool {
 	return false
 }
 
+// allowOnCollection is the Allow header of 405s on collections, homes and
+// principals (RFC 9110 §15.5.6).
+const allowOnCollection = "OPTIONS, PROPFIND, PROPPATCH, REPORT, DELETE"
+
 func (s *Server) get(w http.ResponseWriter, r *http.Request, res *resource) {
 	if res.kind != kObject {
-		w.Header().Set("Allow", "OPTIONS, PROPFIND, PROPPATCH, REPORT, DELETE")
+		w.Header().Set("Allow", allowOnCollection)
 		http.Error(w, "GET is only supported on calendar objects and contacts", http.StatusMethodNotAllowed)
 		return
 	}
@@ -354,6 +380,7 @@ func conds(r *http.Request) store.Cond {
 
 func (s *Server) put(w http.ResponseWriter, r *http.Request, res *resource) {
 	if res.kind != kObject {
+		w.Header().Set("Allow", allowOnCollection)
 		http.Error(w, "PUT is only supported on calendar objects and contacts", http.StatusMethodNotAllowed)
 		return
 	}
@@ -467,7 +494,24 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, res *resource) {
 			needPrivileges(w)
 			return
 		}
-		if err := res.col.Delete(res.name, conds(r)); err != nil {
+		cond := conds(r)
+		if s.perUserApplies(res) {
+			// The client has the ETag with the user's own data in it
+			// (etagOf): check that one, then the store's against the file.
+			if cond.IfMatch != "" && !etagMatch(s.etagOf(res), cond.IfMatch) {
+				http.Error(w, "precondition failed", http.StatusPreconditionFailed)
+				return
+			}
+			if cond.IfNoneMatch != "" && etagMatch(s.etagOf(res), cond.IfNoneMatch) {
+				http.Error(w, "precondition failed", http.StatusPreconditionFailed)
+				return
+			}
+			cond = store.Cond{}
+			if r.Header.Get("If-Match") != "" {
+				cond.IfMatch = res.info.ETag
+			}
+		}
+		if err := res.col.Delete(res.name, cond); err != nil {
 			s.httpError(w, err)
 			return
 		}
@@ -478,7 +522,7 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request, res *resource) {
 		}
 		if res.isShared() {
 			// A sharee "deleting" a shared collection hides it for them.
-			if err := s.store.UpdateSharePrefs(res.owner, res.col.Key(), func(p *store.SharePrefs) { p.Hidden = true }); err != nil {
+			if err := s.store.UpdateSharePrefs(res.owner, res.col, func(p *store.SharePrefs) { p.Hidden = true }); err != nil {
 				s.httpError(w, err)
 				return
 			}
@@ -642,7 +686,7 @@ func (s *Server) addressbookQuery(w http.ResponseWriter, r *http.Request, user s
 	filter := body.Child(dav.NSCardDAV, "filter")
 	limit := 0
 	if l := body.Child(dav.NSCardDAV, "limit"); l != nil {
-		n, err := strconv.Atoi(strings.TrimSpace(l.Child(dav.NSCardDAV, "nresults").Text))
+		n, err := strconv.Atoi(strings.TrimSpace(l.ChildText(dav.NSCardDAV, "nresults")))
 		if err != nil || n < 1 {
 			badRequest(w, "bad limit")
 			return

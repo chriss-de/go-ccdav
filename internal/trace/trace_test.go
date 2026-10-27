@@ -29,7 +29,11 @@ func TestHandler(t *testing.T) {
 	if w.Code != http.StatusMultiStatus || w.Body.String() != "echo:<propfind/>" {
 		t.Fatalf("passthrough broken: %d %q", w.Code, w.Body)
 	}
-	b, err := os.ReadFile(filepath.Join(dir, "00001-al_ice-PROPFIND.txt"))
+	m, _ := filepath.Glob(filepath.Join(dir, "*-00001-al_ice-PROPFIND.txt")) // <run start>-<n>-<user>-<method>
+	if len(m) != 1 {
+		t.Fatalf("trace files %v", m)
+	}
+	b, err := os.ReadFile(m[0])
 	if err != nil {
 		t.Fatal(err)
 	}

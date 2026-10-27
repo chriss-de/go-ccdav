@@ -97,7 +97,7 @@ func (c *Call) addressBook(v *View, col *store.Collection) map[string]any {
 		name = col.Name
 	}
 	if !v.Own {
-		p := c.h.store.SharePrefs(c.User, col.Key())
+		p := c.h.store.SharePrefs(c.User, col)
 		if p.DisplayName != "" {
 			name = p.DisplayName
 		}

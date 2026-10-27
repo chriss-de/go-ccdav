@@ -350,7 +350,7 @@ func (c *Call) updateCalendar(v *View, id string, raw json.RawMessage) error {
 				return failSet(SetForbidden, "only the owner can change "+prop, prop)
 			}
 		}
-		return c.h.store.UpdateSharePrefs(c.User, col.Key(), func(p *store.SharePrefs) {
+		return c.h.store.UpdateSharePrefs(c.User, col, func(p *store.SharePrefs) {
 			if ch.name != nil {
 				p.DisplayName = *ch.name
 			}
